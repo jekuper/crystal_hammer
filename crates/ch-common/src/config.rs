@@ -1,14 +1,13 @@
 //! Agent configuration (TOML on disk, SPECS 13.12).
 //!
-//! The state directory location is still an open decision (SPECS 13.13); `state_dir`
-//! carries whatever the build/deploy picks.
+//! `state_dir` is a configurable path (default below), created if it does not exist.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// Where redb state and the evidence log live.
+    /// Where redb state and the evidence log live. Created if missing.
     pub state_dir: PathBuf,
     /// Port the SPA-gated listener binds once knocked open.
     pub listen_port: u16,

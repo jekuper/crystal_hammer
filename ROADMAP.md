@@ -151,10 +151,16 @@ Delivers confidence that the tool itself isn't the weak link (section 9).
 
 ---
 
-## Deferred design decisions
+## Design decisions
 
-Resolve before the milestone that depends on them:
+Resolved:
 
-- **State/persistence directory** - documented vs obscured footprint. (Blocks M5/M8.)
-- **Dead-man "confirm keep"** delivery and default timeout. (Blocks M2.)
-- **Watchdog mechanism set** and removal-resistance aggressiveness. (Blocks M8.)
+- **State directory** - configurable documented path (default `/var/lib/crystal_hammer`),
+  created if missing. (SPECS 13.13)
+- **Dead-man "confirm keep"** - in-session confirmation, default 60s window; lockdown is
+  session-preserving. (SPECS 13.13, 13.14)
+
+Still to pick before its milestone:
+
+- **Watchdog / supervision layers** - which of the L1-L5 candidate layers to ship.
+  (SPECS 13.15; blocks M8.)

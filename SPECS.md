@@ -379,8 +379,46 @@ plus one registration line. This is the primary extension seam of the codebase.
 - **Session recording:** asciinema **cast v2**-compatible.
 - **Config format:** TOML for watchlist / sentinel / expected-service maps.
 
-### 13.13 Still open (tracked in ROADMAP, not yet decided)
-1. State/persistence directory - documented path vs deliberately obscured footprint.
-2. Dead-man "confirm keep" delivery (in-session confirm vs separate re-knock) and default
-   timeout.
-3. Exact watchdog mechanism set and how aggressively it resists removal.
+### 13.13 Resolved / remaining
+
+Resolved:
+1. **State directory** - a documented, **configurable** path (default
+   `/var/lib/crystal_hammer`), **created if it does not exist**. No obscured footprint.
+2. **Dead-man "confirm keep"** is an **in-session confirmation**: applying lockdown arms
+   the auto-revert timer, and the operator confirms "keep" from within the same session
+   before it expires. Default window 60s.
+
+Remaining:
+3. Exact watchdog / supervision mechanism set (candidate menu below in 13.14).
+
+### 13.14 Session-preserving lockdown
+
+Applying lockdown must **not drop the operator's active session** (the whole point of the
+in-session confirm is that the operator is still there to confirm). This is guaranteed by
+the existing rules, not by luck:
+- the tool's own allow-rule is inserted first and atomically (SPECS section 1);
+- established/related return traffic is allowed via conntrack (SPECS section 1), so the
+  in-flight SSH session keeps flowing while new inbound is denied.
+
+The dead-man timer remains as the backstop for the case where the ruleset is wrong despite
+this and the session does drop.
+
+### 13.15 Watchdog / supervision (candidate menu)
+
+Reliability-only: keep the defender's own agent alive and self-heal if it stops. Layered,
+each layer independent so one failing does not take the others down. Reuses the
+idempotent persistence registry (SPECS 13.10).
+
+- **L1 - Init-system supervision (primary).** systemd unit with `Restart=always` plus a
+  `sd_notify` heartbeat (`WatchdogSec`) so a *hung* agent is restarted, not only a crashed
+  one; `StartLimit*` tuned so it is never rate-limited into staying down. On non-systemd
+  hosts, the OpenRC / runit / s6 / inittab-respawn equivalent.
+- **L2 - Scheduler fallback.** cron `@reboot` + a periodic entry that relaunches the agent
+  if a liveness check fails. Independent of the init system.
+- **L3 - Boot-time self-repair.** on start, the agent idempotently re-installs any of its
+  own supervision entries that are missing, so removing one layer is healed by another.
+- **L4 - Local liveness beacon.** the agent writes a heartbeat (timestamp file or local
+  socket) that supervisors probe and that `info` reports as tool health.
+- **L5 - Off-box liveness (operator-side).** because evidence ships on connect, the
+  operator/collector notices an agent that has stopped checking in. Non-intrusive; no code
+  on the host beyond what already runs.
