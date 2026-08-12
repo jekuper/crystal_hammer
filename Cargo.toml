@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ch-common",
+    "crates/ch-sense",
+    "crates/ch-store",
+    "crates/ch-firewall",
+    "crates/ch-spa",
+    "crates/ch-transport",
+    "crates/ch-persistence",
+    "crates/ch-monitor",
+    "crates/ch-agent",
+    "crates/ch-client",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+authors = ["Jekuper"]
+rust-version = "1.75"
+repository = "https://github.com/Jekuper/crystal_hammer"
+
+[workspace.dependencies]
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto / hashing
+blake3 = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+
+# Storage
+redb = "2"
+
+# SSH transport
+russh = "0.45"
+russh-keys = "0.45"
+
+# Internal crates
+ch-common = { path = "crates/ch-common" }
+ch-sense = { path = "crates/ch-sense" }
+ch-store = { path = "crates/ch-store" }
+ch-firewall = { path = "crates/ch-firewall" }
+ch-spa = { path = "crates/ch-spa" }
+ch-transport = { path = "crates/ch-transport" }
+ch-persistence = { path = "crates/ch-persistence" }
+ch-monitor = { path = "crates/ch-monitor" }
+
+[profile.release]
+# Static IR tool: prefer small, self-contained artifacts.
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

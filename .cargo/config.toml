@@ -1,0 +1,6 @@
+# Force fully static musl binaries (SPECS 13.1). A glibc binary fails on Alpine.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
