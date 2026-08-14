@@ -10,3 +10,4 @@ ch-common.workspace = true
 anyhow.workspace = true
 ed25519-dalek.workspace = true
 serde.workspace = true
+tokio.workspace = true

@@ -16,3 +16,7 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+russh.workspace = true
+russh-keys.workspace = true
+rustyline = "14"
+clap = { version = "4", features = ["derive"] }

@@ -13,3 +13,5 @@ tokio.workspace = true
 tracing.workspace = true
 russh.workspace = true
 russh-keys.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
