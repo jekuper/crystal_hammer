@@ -381,6 +381,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "ch-common",
  "ch-spa",
  "ed25519-dalek",

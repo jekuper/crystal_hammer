@@ -16,3 +16,4 @@ russh-keys.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 async-trait = "0.1"
+base64.workspace = true
