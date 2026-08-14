@@ -18,4 +18,4 @@ rustc-ice-*.txt
 
 
 CLAUDE.local.md
-id_rsa
+id_rsa*

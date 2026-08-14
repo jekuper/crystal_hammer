@@ -8,8 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use anyhow::Result;
-use ch_common::keys::ServerKeys;
+use anyhow::{Context, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,14 +25,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("Crystal Hammer agent starting");
 
-    // Load embedded keys
-    let keys = match ServerKeys::from_embedded() {
-        Some(k) => k,
-        None => {
-            tracing::warn!("No embedded keys found, generating test keypair");
-            ch_common::keys::TeamKeyPair::generate().into()
-        }
-    };
+    // Load embedded public key
+    let key = ch_common::keys::team_pubkey()
+        .context("No embedded public key found in agent binary")?;
 
     // Registries are the extension seams; construct them up front.
     tracing::info!("Loading firewall backend...");
@@ -47,15 +41,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("crystal-hammer agent M1: SPA-gated listener ready");
     
-    // TODO: Start state store and monitoring loop
-    // TODO: Start the SPA-gated listener on configured port
-    // For now, just log that we're ready
-    
-    tracing::info!("Agent running. Waiting for SPA knock...");
-    
-    // Placeholder for listener startup
-    // let port = 2222;
-    // serve(port, &keys).await?;
+    // Start the SPA-gated listener on configured port
+    let port = 2222;
+    ch_transport::serve(port, &key).await?;
     
     Ok(())
 }

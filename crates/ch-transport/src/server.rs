@@ -2,26 +2,23 @@
 
 use async_trait::async_trait;
 use ch_common::Result;
-use ch_common::keys::ServerKeys;
 use ch_spa::{Knock, NonceCache};
 use ed25519_dalek::{Signature, VerifyingKey};
 use russh_keys::PublicKeyBase64;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UdpSocket, TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 /// Run the SPA-gated server indefinitely.
-pub async fn serve(port: u16, keys: &ServerKeys) -> Result<()> {
+pub async fn serve(port: u16, key: &VerifyingKey) -> Result<()> {
     tracing::info!("Starting persistent SPA-gated listener on port {}", port);
     
     let nonce_cache = NonceCache::default();
-    let key = &keys.public;
     
     tokio::try_join!(
-//        accept_udp(udp_socket, key.clone(), nonce_cache.clone(), port),
-        accept_tcp(key.clone(), nonce_cache, port, keys.clone())
+        accept_tcp(key.clone(), nonce_cache, port)
     )?;
 
     Ok(())
@@ -31,7 +28,6 @@ async fn accept_tcp(
     key: VerifyingKey,
     cache: NonceCache,
     port: u16,
-    keys: ServerKeys,
 ) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("Listening on TCP port {} for knocks", port);
@@ -40,7 +36,6 @@ async fn accept_tcp(
         let (mut stream, src) = listener.accept().await?;
         let key_clone = key.clone();
         let cache_clone = cache.clone();
-        let keys_clone = keys.clone();
 
         tokio::spawn(async move {
             let mut buf = [0u8; 128];
@@ -60,7 +55,7 @@ async fn accept_tcp(
                             if verdict == ch_spa::Verdict::Open {
                                 tracing::info!("Valid TCP knock from {}, transitioning to SSH session", src);
                                 
-                                if let Err(e) = handle_ssh_session(stream, keys_clone).await {
+                                if let Err(e) = handle_ssh_session(stream, key_clone).await {
                                     tracing::error!("SSH session error for {}: {:?}", src, e);
                                 }
                                 return;
@@ -211,20 +206,20 @@ impl russh::server::Handler for AgentServerHandler {
     }
 }
 
-/// Upgrades the raw TCP stream directly into standard SSH protocol loop
-async fn handle_ssh_session(stream: TcpStream, keys: ServerKeys) -> Result<()> {
+/// Upgrades the raw TCP stream directly into the standard SSH protocol loop.
+async fn handle_ssh_session(stream: TcpStream, team_public_key: VerifyingKey) -> Result<()> {
     let mut config = russh::server::Config {
         ..Default::default()
     };
     
-    let secret_bytes = keys.secret.to_bytes();
-    let key_pair = russh_keys::key::KeyPair::Ed25519(
-        ed25519_dalek::SigningKey::from_bytes(&secret_bytes)
-    );
+    // Generate a unique host key at runtime.
+    let mut rng = rand::rngs::OsRng;
+    let host_key = ed25519_dalek::SigningKey::generate(&mut rng);
+    let key_pair = russh_keys::key::KeyPair::Ed25519(host_key);
     config.keys.push(key_pair);
 
     let handler = AgentServerHandler {
-        team_public_key: keys.public,
+        team_public_key,
         channels: Arc::new(Mutex::new(HashMap::new())),
     };
 
