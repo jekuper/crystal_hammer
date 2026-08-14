@@ -51,8 +51,10 @@ async fn main() -> Result<()> {
 fn is_root() -> bool {
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::prelude::UidExt;
-        return nix::unistd::Uid::effective().is_root()
+        let uid = Uid::current();
+        if uid.is_root() {
+            println!("Running as root");
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
