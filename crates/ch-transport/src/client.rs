@@ -1,3 +1,4 @@
+// File: crates/ch-transport/src/client.rs
 //! Operator-side connector: send the knock, verify the pinned host key, open a session.
 
 use async_trait::async_trait;
@@ -114,6 +115,79 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
+/// Translates Crossterm KeyEvents into raw ANSI terminal byte sequences.
+fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
+    // Ignore key release events (prominent on Windows)
+    if key.kind == crossterm::event::KeyEventKind::Release {
+        return None;
+    }
+
+    let mut bytes = Vec::new();
+
+    // Translate Control character sequences (e.g. Ctrl+C -> 0x03)
+    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+        match key.code {
+            crossterm::event::KeyCode::Char(c) => {
+                let val = c.to_ascii_lowercase();
+                if val >= 'a' && val <= 'z' {
+                    bytes.push((val as u8) - b'a' + 1);
+                    return Some(bytes);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match key.code {
+        crossterm::event::KeyCode::Char(c) => {
+            let mut buf = [0; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+        crossterm::event::KeyCode::Enter => {
+            bytes.push(b'\r');
+        }
+        crossterm::event::KeyCode::Tab => {
+            bytes.push(b'\t');
+        }
+        crossterm::event::KeyCode::Backspace => {
+            bytes.push(127); // Standard DEL control byte for backspace
+        }
+        crossterm::event::KeyCode::Esc => {
+            bytes.push(27);
+        }
+        crossterm::event::KeyCode::Up => {
+            bytes.extend_from_slice(b"\x1b[A");
+        }
+        crossterm::event::KeyCode::Down => {
+            bytes.extend_from_slice(b"\x1b[B");
+        }
+        crossterm::event::KeyCode::Right => {
+            bytes.extend_from_slice(b"\x1b[C");
+        }
+        crossterm::event::KeyCode::Left => {
+            bytes.extend_from_slice(b"\x1b[D");
+        }
+        crossterm::event::KeyCode::Home => {
+            bytes.extend_from_slice(b"\x1b[H");
+        }
+        crossterm::event::KeyCode::End => {
+            bytes.extend_from_slice(b"\x1b[F");
+        }
+        crossterm::event::KeyCode::PageUp => {
+            bytes.extend_from_slice(b"\x1b[5~");
+        }
+        crossterm::event::KeyCode::PageDown => {
+            bytes.extend_from_slice(b"\x1b[6~");
+        }
+        crossterm::event::KeyCode::Delete => {
+            bytes.extend_from_slice(b"\x1b[3~");
+        }
+        _ => return None,
+    }
+
+    Some(bytes)
+}
+
 /// Connect to an agent: knock, then russh handshake with host-key pinning.
 pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     tracing::info!("Connecting to {}:{}", target.host, target.port);
@@ -182,9 +256,23 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     // Enable raw mode to synchronize echoing and line buffering
     let _raw_mode_guard = RawModeGuard::new();
 
-    use tokio::io::AsyncReadExt;
-    let mut stdin = tokio::io::stdin();
-    let mut buf = [0u8; 1024];
+    // Spawn a background thread to read events from the console using crossterm
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+    std::thread::spawn(move || {
+        loop {
+            match crossterm::event::read() {
+                Ok(crossterm::event::Event::Key(key_event)) => {
+                    if let Some(bytes) = key_event_to_bytes(key_event) {
+                        if stdin_tx.blocking_send(bytes).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {} // Ignore focus, mouse, and resize events
+                Err(_) => break,
+            }
+        }
+    });
 
     #[cfg(unix)]
     {
@@ -206,19 +294,18 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
                         let _ = channel.window_change(c as u32, r as u32, 0, 0).await;
                     }
                 }
-                res = stdin.read(&mut buf) => {
+                res = stdin_rx.recv() => {
                     match res {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            tracing::info!(
-                                hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
-                                "stdin → ssh"
+                        None => break,
+                        Some(data) => {
+                            tracing::trace!(
+                                hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                                "stdin -> ssh"
                             );
-                            if channel.data(&buf[..n]).await.is_err() {
+                            if channel.data(&data[..]).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
                     }
                 }
             }
@@ -233,15 +320,18 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
                     tracing::info!("Session closed by remote host");
                     break;
                 }
-                res = stdin.read(&mut buf) => {
+                res = stdin_rx.recv() => {
                     match res {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if channel.data(&buf[..n]).await.is_err() {
+                        None => break,
+                        Some(data) => {
+                            tracing::trace!(
+                                hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                                "stdin -> ssh"
+                            );
+                            if channel.data(&data[..]).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
                     }
                 }
             }
@@ -250,8 +340,6 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
 
     Ok(())
 }
-
-
 
 async fn connect_direct(target: &Target, keypair: &OperatorKeyPair) -> Result<TcpStream> {
     tracing::info!("Direct connection to {}:{}", target.host, target.port);
