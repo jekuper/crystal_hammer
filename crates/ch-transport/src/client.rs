@@ -11,6 +11,11 @@ use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use tokio::io::unix::AsyncFd;
+
 use crate::proxy::Hop;
 
 struct RawModeGuard;
@@ -115,7 +120,25 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
+/// Set O_NONBLOCK on a raw fd so it can be driven by tokio's `AsyncFd`.
+#[cfg(unix)]
+fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let r = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Translates Crossterm KeyEvents into raw ANSI terminal byte sequences.
+///
+/// Only used on non-unix targets, where there is no `/dev/tty` to read raw
+/// bytes from. On unix we forward the terminal's own byte stream verbatim.
+#[cfg(not(unix))]
 fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
     // Ignore key release events (prominent on Windows)
     if key.kind == crossterm::event::KeyEventKind::Release {
@@ -191,9 +214,9 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
 /// Connect to an agent: knock, then russh handshake with host-key pinning.
 pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     tracing::info!("Connecting to {}:{}", target.host, target.port);
-    
+
     let keypair = load_operator_keypair()?;
-    
+
     let stream = if via.is_empty() {
         connect_direct(target, &keypair).await?
     } else {
@@ -201,12 +224,12 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     };
 
     tracing::info!("Connection established, transitioning stream to russh");
-    
+
     let config = russh::client::Config {
         ..Default::default()
     };
     let config = Arc::new(config);
-    
+
     let (close_tx, mut close_rx) = tokio::sync::oneshot::channel::<()>();
 
     let handler = ClientHandler {
@@ -256,27 +279,21 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     // Enable raw mode to synchronize echoing and line buffering
     let _raw_mode_guard = RawModeGuard::new();
 
-    // Spawn a background thread to read events from the console using crossterm
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
-    std::thread::spawn(move || {
-        loop {
-            match crossterm::event::read() {
-                Ok(crossterm::event::Event::Key(key_event)) => {
-                    if let Some(bytes) = key_event_to_bytes(key_event) {
-                        if stdin_tx.blocking_send(bytes).is_err() {
-                            break;
-                        }
-                    }
-                }
-                Ok(_) => {} // Ignore focus, mouse, and resize events
-                Err(_) => break,
-            }
-        }
-    });
-
     #[cfg(unix)]
     {
-        let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+        // Read raw terminal bytes directly from the controlling terminal.
+        // crossterm's raw mode above applies to /dev/tty, so this fd sees the
+        // same un-cooked byte stream — every escape sequence intact. Forwarding
+        // opaque bytes means application-cursor mode (DECCKM), terminal query
+        // responses, modified arrows, Meta bindings, and bracketed paste all
+        // pass through without the client needing to know remote terminal state.
+        let tty = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
+        set_nonblocking(tty.as_raw_fd())?;
+        let async_tty = AsyncFd::new(tty)?;
+
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+
         loop {
             tokio::select! {
                 _ = &mut close_rx => {
@@ -294,18 +311,38 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
                         let _ = channel.window_change(c as u32, r as u32, 0, 0).await;
                     }
                 }
-                res = stdin_rx.recv() => {
-                    match res {
-                        None => break,
-                        Some(data) => {
+                readable = async_tty.readable() => {
+                    let mut guard = match readable {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+
+                    let mut buf = [0u8; 4096];
+                    let read_result = guard.try_io(|inner| {
+                        let fd = inner.get_ref().as_raw_fd();
+                        let n = unsafe {
+                            libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                        };
+                        if n < 0 {
+                            Err(std::io::Error::last_os_error())
+                        } else {
+                            Ok(n as usize)
+                        }
+                    });
+
+                    match read_result {
+                        Ok(Ok(0)) => break,            // EOF on the tty
+                        Ok(Ok(n)) => {
                             tracing::trace!(
-                                hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                                hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                                 "stdin -> ssh"
                             );
-                            if channel.data(&data[..]).await.is_err() {
+                            if channel.data(&buf[..n]).await.is_err() {
                                 break;
                             }
                         }
+                        Ok(Err(_)) => break,           // real read error
+                        Err(_would_block) => continue, // readiness was spurious; re-arm
                     }
                 }
             }
@@ -314,6 +351,25 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
 
     #[cfg(not(unix))]
     {
+        // No /dev/tty on non-unix: decode key events with crossterm and
+        // re-encode them into terminal byte sequences on a blocking thread.
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        std::thread::spawn(move || {
+            loop {
+                match crossterm::event::read() {
+                    Ok(crossterm::event::Event::Key(key_event)) => {
+                        if let Some(bytes) = key_event_to_bytes(key_event) {
+                            if stdin_tx.blocking_send(bytes).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {} // Ignore focus, mouse, and resize events
+                    Err(_) => break,
+                }
+            }
+        });
+
         loop {
             tokio::select! {
                 _ = &mut close_rx => {
@@ -343,11 +399,11 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
 
 async fn connect_direct(target: &Target, keypair: &OperatorKeyPair) -> Result<TcpStream> {
     tracing::info!("Direct connection to {}:{}", target.host, target.port);
-    
+
     let mut stream = TcpStream::connect(format!("{}:{}", target.host, target.port)).await?;
-    
+
     send_knock_direct(&mut stream, keypair, target.port).await?;
-    
+
     Ok(stream)
 }
 
@@ -365,13 +421,13 @@ async fn connect_via_proxy_chain(
     keypair: &OperatorKeyPair,
 ) -> Result<TcpStream> {
     tracing::info!("Proxy chain with {} hops", hops.len());
-    
+
     let (first_host, first_port) = get_hop_addr(&hops[0]);
     let mut stream = TcpStream::connect(format!("{}:{}", first_host, first_port)).await?;
-    
+
     for (idx, hop) in hops.iter().enumerate() {
         tracing::info!("Processing hop {}/{}", idx + 1, hops.len());
-        
+
         match hop {
             Hop::Jump { host, port } => {
                 tracing::info!("ProxyJump to {}:{}", host, port);
@@ -391,7 +447,7 @@ async fn connect_via_proxy_chain(
             }
         }
     }
-    
+
     Ok(stream)
 }
 
@@ -400,23 +456,23 @@ async fn send_knock_direct(stream: &mut TcpStream, keypair: &OperatorKeyPair, se
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    
+
     let nonce = generate_nonce();
-    
+
     let knock = Knock {
         timestamp,
         nonce,
         service: service_port,
         key_id: 1,
     };
-    
+
     let sig = keypair.secret.sign(&knock.signed_bytes());
-    
+
     let message = [knock.signed_bytes().as_slice(), sig.to_bytes().as_slice()].concat();
     stream.write_all(&message).await?;
-    
+
     tracing::debug!("Sent SPA knock ({} bytes)", message.len());
-    
+
     Ok(())
 }
 
@@ -424,7 +480,7 @@ async fn spawn_proxy_command(argv: &[String]) -> Result<TcpStream> {
     use tokio::net::TcpListener;
 
     let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    
+
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let local_addr = listener.local_addr()?;
 
@@ -433,7 +489,7 @@ async fn spawn_proxy_command(argv: &[String]) -> Result<TcpStream> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()?;
-    
+
     let mut child_stdin = child.stdin.take().expect("Failed to open stdin");
     let mut child_stdout = child.stdout.take().expect("Failed to open stdout");
 
@@ -442,12 +498,12 @@ async fn spawn_proxy_command(argv: &[String]) -> Result<TcpStream> {
 
     tokio::spawn(async move {
         let _ = tokio::io::copy_bidirectional(
-            &mut server_stream, 
+            &mut server_stream,
             &mut tokio::io::join(&mut child_stdout, &mut child_stdin)
         ).await;
         let _ = child.wait().await;
     });
-    
+
     Ok(client_stream)
 }
 
@@ -461,9 +517,9 @@ async fn spawn_teleport_proxy(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()?;
-    
+
     let _ = proxy_cmd.wait().await;
-    
+
     let stream = TcpStream::connect(format!("127.0.0.1:22")).await?;
     Ok(stream)
 }
@@ -484,7 +540,7 @@ fn load_operator_keypair() -> Result<OperatorKeyPair> {
 
 fn parse_private_key(raw_bytes: &[u8]) -> Option<OperatorKeyPair> {
     let key_str = std::str::from_utf8(raw_bytes).ok()?;
-    
+
     if raw_bytes.len() == 64 {
         let secret_bytes: [u8; 32] = raw_bytes[..32].try_into().ok()?;
         let public_bytes: [u8; 32] = raw_bytes[32..].try_into().ok()?;
@@ -496,10 +552,10 @@ fn parse_private_key(raw_bytes: &[u8]) -> Option<OperatorKeyPair> {
     if key_str.contains("BEGIN OPENSSH PRIVATE KEY") {
         let lines: Vec<&str> = key_str.lines().collect();
         let b64_body = lines[1..lines.len() - 1].join("");
-        
+
         use base64::Engine;
         let decoded = base64::engine::general_purpose::STANDARD.decode(b64_body).ok()?;
-        
+
         if decoded.len() > 100 {
             let mut i = 0;
             while i + 64 <= decoded.len() {
