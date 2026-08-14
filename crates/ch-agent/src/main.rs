@@ -54,8 +54,9 @@ fn is_root() -> bool {
         use nix::unistd::Uid;
         let uid = Uid::current();
         if uid.is_root() {
-            println!("Running as root");
+            return true;
         }
+        return false;
     }
 
     #[cfg(not(target_os = "linux"))]
