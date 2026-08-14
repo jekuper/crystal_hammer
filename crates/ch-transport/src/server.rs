@@ -19,60 +19,15 @@ pub async fn serve(port: u16, keys: &ServerKeys) -> Result<()> {
     let nonce_cache = NonceCache::default();
     let key = &keys.public;
     
-    let udp_socket = Arc::new(UdpSocket::bind(("0.0.0.0", port)).await?);
-    let udp_socket_clone = udp_socket.clone();
-    
     tokio::try_join!(
-        accept_udp(udp_socket, key.clone(), nonce_cache.clone(), port),
-        accept_tcp(udp_socket_clone, key.clone(), nonce_cache, port, keys.clone())
+//        accept_udp(udp_socket, key.clone(), nonce_cache.clone(), port),
+        accept_tcp(key.clone(), nonce_cache, port, keys.clone())
     )?;
 
     Ok(())
 }
 
-async fn accept_udp(
-    socket: Arc<UdpSocket>,
-    key: VerifyingKey,
-    cache: NonceCache,
-    port: u16,
-) -> Result<()> {
-    let mut buf = [0u8; 128];
-    
-    loop {
-        let (len, src) = socket.recv_from(&mut buf).await?;
-        let raw = &buf[..len];
-        if raw.len() < 30 {
-            continue;
-        }
-        
-        let maybe_knock = Knock::from_bytes(raw);
-        let signature = &raw[30..];
-        
-        if let Some(knock) = maybe_knock {
-            if knock.service == port {
-                let signature_bytes = match Signature::try_from(signature) {
-                    Ok(sig) => sig,
-                    Err(_) => continue,
-                };
-                
-                let verdict = ch_spa::validate(
-                    &knock, 
-                    &signature_bytes, 
-                    &key, 
-                    &cache, 
-                    current_timestamp()
-                ).await;
-
-                if verdict == ch_spa::Verdict::Open {
-                    tracing::info!("Valid UDP knock from {}.", src);
-                }
-            }
-        }
-    }
-}
-
 async fn accept_tcp(
-    _socket: Arc<UdpSocket>,
     key: VerifyingKey,
     cache: NonceCache,
     port: u16,
