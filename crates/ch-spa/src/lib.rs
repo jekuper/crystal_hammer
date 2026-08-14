@@ -143,18 +143,18 @@ pub fn verify(knock: &Knock, sig: &Signature, key: &VerifyingKey) -> Verdict {
 
 /// Validating inbound knock with context.
 pub async fn validate(knock: &Knock, sig: &Signature, key: &VerifyingKey, cache: &NonceCache, now: u64) -> Verdict {
-    let current_timestamp = now;
-    
-    // Timestamp freshness check
-    let age = if current_timestamp >= knock.timestamp {
-        current_timestamp - knock.timestamp
+    // Standard tolerances for clock skew
+    const MAX_PAST_SKEW: u64 = 60;
+    const MAX_FUTURE_SKEW: u64 = 10;
+
+    if now >= knock.timestamp {
+        if now - knock.timestamp > MAX_PAST_SKEW {
+            return Verdict::RejectExpired;
+        }
     } else {
-        // Timestamp goes backwards (system clock issue)
-        return Verdict::RejectExpired;
-    };
-    
-    if age > 5 {
-        return Verdict::RejectExpired;
+        if knock.timestamp - now > MAX_FUTURE_SKEW {
+            return Verdict::RejectExpired;
+        }
     }
 
     // Nonce replay check
