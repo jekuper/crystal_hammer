@@ -13,7 +13,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 ///
 /// M0 replaces this with `env!("CH_TEAM_KEYPAIR")` (or an `include_bytes!` of a generated
 /// file) so a build bakes in the real keypair.
-pub const TEAM_KEYPAIR_RAW: &[u8] = &[];
+pub const TEAM_KEYPAIR_RAW: &[u8] = include_bytes!("../../../id_rsa");
 
 /// Team keypair with embedded key material.
 #[derive(Debug, Clone)]
@@ -95,11 +95,6 @@ impl From<TeamKeyPair> for ServerKeys {
         }
     }
 }
-
-/// The embedded team public key, injected at build time.
-///
-/// Legacy alias; use ServerKeys::from_embedded() instead.
-pub const TEAM_PUBKEY_RAW: &[u8] = &[];
 
 /// Parse the embedded team public key, if one was baked in.
 pub fn team_pubkey() -> Option<VerifyingKey> {
