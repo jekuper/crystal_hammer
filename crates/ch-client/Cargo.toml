@@ -18,5 +18,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 russh.workspace = true
 russh-keys.workspace = true
-rustyline = "14"
+rustyline.workspace = true
 clap = { version = "4", features = ["derive"] }

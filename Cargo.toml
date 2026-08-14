@@ -53,6 +53,7 @@ russh-keys = "0.45"
 nix = { version = "0.29", features = ["fs", "user", "process", "term"] }
 libc = "0.2"
 crossterm = "0.28"
+rustyline = "14"
 
 # Internal crates
 ch-common = { path = "crates/ch-common" }

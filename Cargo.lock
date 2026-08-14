@@ -391,6 +391,7 @@ dependencies = [
  "rand",
  "russh",
  "russh-keys",
+ "rustyline",
  "tokio",
  "tracing",
 ]
