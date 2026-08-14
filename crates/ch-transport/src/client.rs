@@ -43,6 +43,7 @@ pub struct OperatorKeyPair {
 /// Handler for the russh client session.
 struct ClientHandler {
     expected_key: VerifyingKey,
+    close_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[async_trait]
@@ -89,6 +90,28 @@ impl russh::client::Handler for ClientHandler {
         stderr.flush().await?;
         Ok(())
     }
+
+    async fn channel_close(
+        &mut self,
+        _channel: russh::ChannelId,
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: russh::ChannelId,
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        if let Some(tx) = self.close_tx.take() {
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
 }
 
 /// Connect to an agent: knock, then russh handshake with host-key pinning.
@@ -110,8 +133,11 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     };
     let config = Arc::new(config);
     
+    let (close_tx, mut close_rx) = tokio::sync::oneshot::channel::<()>();
+
     let handler = ClientHandler {
         expected_key: keypair.public,
+        close_tx: Some(close_tx),
     };
 
     let mut session = russh::client::connect_stream(config, stream, handler)
@@ -139,8 +165,10 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+
     channel
-        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+        .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
@@ -157,20 +185,69 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     use tokio::io::AsyncReadExt;
     let mut stdin = tokio::io::stdin();
     let mut buf = [0u8; 1024];
-    loop {
-        match stdin.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                if channel.data(&buf[..n]).await.is_err() {
+
+    #[cfg(unix)]
+    {
+        let mut sigwinch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
+        loop {
+            tokio::select! {
+                _ = &mut close_rx => {
+                    tracing::info!("Session closed by remote host");
                     break;
                 }
+                Some(_) = async {
+                    if let Some(ref mut sig) = sigwinch {
+                        sig.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok((c, r)) = crossterm::terminal::size() {
+                        let _ = channel.window_change(c as u32, r as u32, 0, 0).await;
+                    }
+                }
+                res = stdin.read(&mut buf) => {
+                    match res {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if channel.data(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
             }
-            Err(_) => break,
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        loop {
+            tokio::select! {
+                _ = &mut close_rx => {
+                    tracing::info!("Session closed by remote host");
+                    break;
+                }
+                res = stdin.read(&mut buf) => {
+                    match res {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if channel.data(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
         }
     }
 
     Ok(())
 }
+
+
 
 async fn connect_direct(target: &Target, keypair: &OperatorKeyPair) -> Result<TcpStream> {
     tracing::info!("Direct connection to {}:{}", target.host, target.port);

@@ -11,6 +11,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
+#[cfg(unix)]
+type RawFd = std::os::fd::RawFd;
+#[cfg(not(unix))]
+type RawFd = i32;
+
+#[cfg(unix)]
+fn set_winsize(fd: RawFd, cols: u32, rows: u32) {
+    let size = libc::winsize {
+        ws_row: rows as u16,
+        ws_col: cols as u16,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(fd, libc::TIOCSWINSZ, &size);
+    }
+}
+
 /// Run the SPA-gated server indefinitely.
 pub async fn serve(port: u16, key: &VerifyingKey) -> Result<()> {
     tracing::info!("Starting persistent SPA-gated listener on port {}", port);
@@ -82,6 +100,8 @@ async fn accept_tcp(
 struct AgentServerHandler {
     team_public_key: VerifyingKey,
     channels: Arc<Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<Vec<u8>>>>>,
+    terminal_size: Arc<Mutex<HashMap<russh::ChannelId, (u32, u32)>>>,
+    pty_masters: Arc<Mutex<HashMap<russh::ChannelId, RawFd>>>,
 }
 
 #[async_trait]
@@ -117,15 +137,35 @@ impl russh::server::Handler for AgentServerHandler {
 
     async fn pty_request(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         _term: &str,
-        _col_width: u32,
-        _row_height: u32,
+        col_width: u32,
+        row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
         _modes: &[(russh::Pty, u32)],
         _session: &mut russh::server::Session,
     ) -> std::result::Result<(), Self::Error> {
+        self.terminal_size.lock().unwrap().insert(channel, (col_width, row_height));
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: russh::ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut russh::server::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        self.terminal_size.lock().unwrap().insert(channel, (col_width, row_height));
+        #[cfg(unix)]
+        {
+            if let Some(&master_fd) = self.pty_masters.lock().unwrap().get(&channel) {
+                set_winsize(master_fd, col_width, row_height);
+            }
+        }
         Ok(())
     }
 
@@ -141,7 +181,7 @@ impl russh::server::Handler for AgentServerHandler {
         Ok(())
     }
 
-        async fn shell_request(
+    async fn shell_request(
         &mut self,
         channel: russh::ChannelId,
         session: &mut russh::server::Session,
@@ -164,6 +204,14 @@ impl russh::server::Handler for AgentServerHandler {
             let pty = openpty(None, None)?;
             let master_fd = pty.master.into_raw_fd();
             let slave_fd = pty.slave.into_raw_fd();
+
+            // Set initial terminal size if requested by the client
+            if let Some(&(cols, rows)) = self.terminal_size.lock().unwrap().get(&channel) {
+                set_winsize(master_fd, cols, rows);
+            }
+
+            // Keep track of master_fd for future window resizing requests
+            self.pty_masters.lock().unwrap().insert(channel, master_fd);
 
             let mut cmd = tokio::process::Command::new(shell_path);
 
@@ -210,6 +258,7 @@ impl russh::server::Handler for AgentServerHandler {
 
             // Pipe PTY stdout/stderr back to SSH channel
             let handle = session.handle();
+            let pty_masters_clone = self.pty_masters.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -222,6 +271,7 @@ impl russh::server::Handler for AgentServerHandler {
                 }
                 let _ = handle.close(channel).await;
                 let _ = child.kill().await;
+                pty_masters_clone.lock().unwrap().remove(&channel);
             });
 
             Ok(())
@@ -301,6 +351,8 @@ async fn handle_ssh_session(stream: TcpStream, team_public_key: VerifyingKey) ->
     let handler = AgentServerHandler {
         team_public_key,
         channels: Arc::new(Mutex::new(HashMap::new())),
+        terminal_size: Arc::new(Mutex::new(HashMap::new())),
+        pty_masters: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tokio::spawn(async move {
