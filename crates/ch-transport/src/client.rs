@@ -210,6 +210,10 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
                     match res {
                         Ok(0) => break,
                         Ok(n) => {
+                            tracing::info!(
+                                hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                                "stdin → ssh"
+                            );
                             if channel.data(&buf[..n]).await.is_err() {
                                 break;
                             }

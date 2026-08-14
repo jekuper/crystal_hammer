@@ -177,7 +177,7 @@ impl russh::server::Handler for AgentServerHandler {
         data: &[u8],
         _session: &mut russh::server::Session,
     ) -> std::result::Result<(), Self::Error> {
-        tracing::trace!(
+        tracing::info!(
             channel = ?channel,
             bytes = ?data,
             hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
@@ -265,7 +265,7 @@ impl russh::server::Handler for AgentServerHandler {
             let mut master_write = async_master.try_clone().await?;
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
-                    tracing::trace!(
+                    tracing::info!(
                         hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                         "writing to pty master"
                     );
@@ -285,7 +285,7 @@ impl russh::server::Handler for AgentServerHandler {
                     match async_master.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            tracing::trace!(
+                            tracing::info!(
                                 hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                                 "reading from pty master"
                             );
