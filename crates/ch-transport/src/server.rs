@@ -265,7 +265,7 @@ impl russh::server::Handler for AgentServerHandler {
             let mut master_write = async_master.try_clone().await?;
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
-                    tracing::info!(
+                    tracing::trace!(
                         hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                         "writing to pty master"
                     );
