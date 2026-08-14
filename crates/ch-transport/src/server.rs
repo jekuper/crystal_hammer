@@ -38,34 +38,42 @@ async fn accept_tcp(
         let cache_clone = cache.clone();
 
         tokio::spawn(async move {
-            let mut buf = [0u8; 128];
-            match stream.read(&mut buf).await {
-                Ok(len) if len >= 30 => {
-                    let raw = &buf[..len];
-                    if let Some(knock) = Knock::from_bytes(raw) {
-                        if let Ok(signature) = Signature::try_from(&raw[30..]) {
-                            let verdict = ch_spa::validate(
-                                &knock, 
-                                &signature, 
-                                &key_clone, 
-                                &cache_clone,
-                                current_timestamp()
-                            ).await;
+            let mut buf = [0u8; 94];
+            if let Err(e) = stream.read_exact(&mut buf).await {
+                tracing::debug!("Aborted or quiet connection from {}: {:?}", src, e);
+                return;
+            }
 
-                            if verdict == ch_spa::Verdict::Open {
-                                tracing::info!("Valid TCP knock from {}, transitioning to SSH session", src);
-                                
-                                if let Err(e) = handle_ssh_session(stream, key_clone).await {
-                                    tracing::error!("SSH session error for {}: {:?}", src, e);
-                                }
-                                return;
+            if let Some(knock) = Knock::from_bytes(&buf) {
+                let mut sig_bytes = [0u8; 64];
+                sig_bytes.copy_from_slice(&buf[30..94]);
+
+                if let Ok(signature) = Signature::try_from(&sig_bytes[..]) {
+                    let verdict = ch_spa::validate(
+                        &knock, 
+                        &signature, 
+                        &key_clone, 
+                        &cache_clone,
+                        current_timestamp()
+                    ).await;
+
+                    match verdict {
+                        ch_spa::Verdict::Open => {
+                            tracing::info!("Valid TCP knock from {}, transitioning to SSH session", src);
+                            if let Err(e) = handle_ssh_session(stream, key_clone).await {
+                                tracing::error!("SSH session error for {}: {:?}", src, e);
                             }
                         }
+                        other => {
+                            tracing::warn!("Rejected TCP knock from {}: {:?}", src, other);
+                        }
                     }
+                } else {
+                    tracing::warn!("Failed to parse signature from knock from {}", src);
                 }
-                _ => {}
+            } else {
+                tracing::warn!("Failed to parse knock headers from {}", src);
             }
-            tracing::debug!("Invalid or quiet connection from {} dropped", src);
         });
     }
 }
@@ -206,7 +214,7 @@ impl russh::server::Handler for AgentServerHandler {
     }
 }
 
-/// Upgrades the raw TCP stream directly into the standard SSH protocol loop.
+/// Upgrades the raw TCP stream directly into standard SSH protocol loop.
 async fn handle_ssh_session(stream: TcpStream, team_public_key: VerifyingKey) -> Result<()> {
     let mut config = russh::server::Config {
         ..Default::default()
