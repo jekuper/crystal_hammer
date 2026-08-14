@@ -1,9 +1,12 @@
 //! Operator-side connector: send the knock, verify the pinned host key, open a session.
 
-use ch_common::{keys::TeamKeyPair, Result, Hash};
-use ch_common::keys::TEAM_KEYPAIR_RAW;
+use async_trait::async_trait;
+use ch_common::keys::{TeamKeyPair, TEAM_KEYPAIR_RAW};
+use ch_common::Result;
 use ch_spa::Knock;
-use ed25519_dalek::{VerifyingKey, Signer};
+use ed25519_dalek::Signer;
+use russh_keys::PublicKeyBase64;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -17,36 +20,132 @@ pub struct Target {
     pub port: u16,
 }
 
+/// Handler for the russh client session.
+struct ClientHandler {
+    expected_key: ed25519_dalek::VerifyingKey,
+}
+
+#[async_trait]
+impl russh::client::Handler for ClientHandler {
+    type Error = anyhow::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh_keys::key::PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        let raw_bytes = server_public_key.public_key_bytes();
+        let expected_bytes = self.expected_key.to_bytes();
+
+        if raw_bytes.ends_with(&expected_bytes) {
+            tracing::info!("Server host key matches pinned team public key");
+            Ok(true)
+        } else {
+            tracing::error!("MITM Warning: Server host key does not match pinned team key!");
+            Ok(false)
+        }
+    }
+
+    async fn data(
+        &mut self,
+        _channel: russh::ChannelId,
+        data: &[u8],
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let mut stdout = tokio::io::stdout();
+        stdout.write_all(data).await?;
+        stdout.flush().await?;
+        Ok(())
+    }
+
+    async fn extended_data(
+        &mut self,
+        _channel: russh::ChannelId,
+        _ext: u32,
+        data: &[u8],
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let mut stderr = tokio::io::stderr();
+        stderr.write_all(data).await?;
+        stderr.flush().await?;
+        Ok(())
+    }
+}
+
 /// Connect to an agent: knock, then russh handshake with host-key pinning.
 pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
     tracing::info!("Connecting to {}:{}", target.host, target.port);
     
-    // Load the team keypair
     let keypair = load_keypair()?;
     
-    // Perform reachability chain
-    let mut stream = if via.is_empty() {
-        // Direct connection
+    let stream = if via.is_empty() {
         connect_direct(target, &keypair).await?
     } else {
-        // Proxy chain
         connect_via_proxy_chain(via, target, &keypair).await?
     };
 
-    tracing::info!("Connection established, starting SSH session");
+    tracing::info!("Connection established, transitioning stream to russh");
     
-    // Get server public key for pinning
-    let server_key = get_server_key(&mut stream).await?;
-    verify_server_key(&server_key)?;
+    let config = russh::client::Config {
+        ..Default::default()
+    };
+    let config = Arc::new(config);
     
-    // Perform SSH handshake with mutual auth
-    perform_ssh_handshake(&mut stream, &keypair).await?;
-    
+    let handler = ClientHandler {
+        expected_key: keypair.public,
+    };
+
+    let mut session = russh::client::connect_stream(config, stream, handler)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    let secret_bytes = keypair.secret.to_bytes();
+    let key_pair = russh_keys::key::KeyPair::Ed25519(
+        ed25519_dalek::SigningKey::from_bytes(&secret_bytes)
+    );
+
+    let auth_res = session
+        .authenticate_publickey("root", Arc::new(key_pair))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    if !auth_res {
+        return Err(ch_common::Error::Auth);
+    }
+
     tracing::info!("Authenticated SSH session established");
-    
-    // TODO: PTY shell and file transfer channels
-    // For M1 completion, we just need to get to this point
-    
+
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    channel
+        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    channel
+        .request_shell(true)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    tracing::info!("Interactive PTY shell allocated");
+
+    use tokio::io::AsyncReadExt;
+    let mut stdin = tokio::io::stdin();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stdin.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if channel.data(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
     Ok(())
 }
 
@@ -55,7 +154,6 @@ async fn connect_direct(target: &Target, keypair: &TeamKeyPair) -> Result<TcpStr
     
     let mut stream = TcpStream::connect(format!("{}:{}", target.host, target.port)).await?;
     
-    // Send SPA knock as first bytes
     send_knock_direct(&mut stream, keypair, target.port).await?;
     
     Ok(stream)
@@ -106,27 +204,22 @@ async fn connect_via_proxy_chain(
 }
 
 async fn send_knock_direct(stream: &mut TcpStream, keypair: &TeamKeyPair, service_port: u16) -> Result<()> {
-    // Generate monotonic timestamp
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     
-    // Generate random nonce
     let nonce = generate_nonce();
     
-    // Create knock
     let knock = Knock {
         timestamp,
         nonce,
         service: service_port,
-        key_id: 1, // Single key for now
+        key_id: 1,
     };
     
-    // Sign the knock
     let sig = keypair.secret.sign(&knock.signed_bytes());
     
-    // Send combined message (knock + signature)
     let message = [knock.signed_bytes().as_slice(), sig.to_bytes().as_slice()].concat();
     stream.write_all(&message).await?;
     
@@ -140,7 +233,6 @@ async fn spawn_proxy_command(argv: &[String]) -> Result<TcpStream> {
 
     let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     
-    // Bind to a local port to bridge standard pipes with a real TcpStream
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let local_addr = listener.local_addr()?;
 
@@ -189,7 +281,6 @@ fn load_keypair() -> Result<TeamKeyPair> {
         TeamKeyPair::from_embedded()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to load embedded keypair").into())
     } else {
-        // Generate for testing
         Ok(TeamKeyPair::generate())
     }
 }
@@ -202,36 +293,18 @@ fn generate_nonce() -> [u8; 16] {
     bytes
 }
 
-async fn get_server_key(_stream: &mut TcpStream) -> Result<VerifyingKey> {
-    // Perform initial SSH handshake to get server key
-    // TODO: Implement proper russh handshake for key extraction
-    // For now, return a placeholder
+async fn get_server_key(_stream: &mut TcpStream) -> Result<ed25519_dalek::VerifyingKey> {
     let bytes = [0u8; 32];
-    let key = VerifyingKey::from_bytes(&bytes)
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     Ok(key)
 }
 
-fn verify_server_key(key: &VerifyingKey) -> Result<()> {
-    let public_key_bytes = key.to_bytes();
-    let hash = Hash::of(&public_key_bytes);
-    
-    tracing::info!("Server host key fingerprint: {}", hash);
-    
-    // TODO: Pin against a pre-configured expected key
-    // This is critical for preventing MITM attacks
-    
+fn verify_server_key(_key: &ed25519_dalek::VerifyingKey) -> Result<()> {
     Ok(())
 }
 
 async fn perform_ssh_handshake(_stream: &mut TcpStream, _keypair: &TeamKeyPair) -> Result<()> {
-    // TODO: Complete russh handshake
-    // This includes:
-    // - Client identification string
-    // - Server identification parsing
-    // - Key exchange
-    // - Authentication (with embedded key)
-    
     Ok(())
 }
 

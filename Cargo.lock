@@ -373,6 +373,7 @@ name = "ch-transport"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "ch-common",
  "ch-spa",
  "ed25519-dalek",
