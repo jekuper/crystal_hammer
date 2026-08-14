@@ -102,6 +102,7 @@ struct AgentServerHandler {
     channels: Arc<Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<Vec<u8>>>>>,
     terminal_size: Arc<Mutex<HashMap<russh::ChannelId, (u32, u32)>>>,
     pty_masters: Arc<Mutex<HashMap<russh::ChannelId, RawFd>>>,
+    terminal_types: Arc<Mutex<HashMap<russh::ChannelId, String>>>, 
 }
 
 #[async_trait]
@@ -138,7 +139,7 @@ impl russh::server::Handler for AgentServerHandler {
     async fn pty_request(
         &mut self,
         channel: russh::ChannelId,
-        _term: &str,
+        term: &str,
         col_width: u32,
         row_height: u32,
         _pix_width: u32,
@@ -147,6 +148,7 @@ impl russh::server::Handler for AgentServerHandler {
         _session: &mut russh::server::Session,
     ) -> std::result::Result<(), Self::Error> {
         self.terminal_size.lock().unwrap().insert(channel, (col_width, row_height));
+        self.terminal_types.lock().unwrap().insert(channel, term.to_string());
         Ok(())
     }
 
@@ -214,6 +216,14 @@ impl russh::server::Handler for AgentServerHandler {
             self.pty_masters.lock().unwrap().insert(channel, master_fd);
 
             let mut cmd = tokio::process::Command::new(shell_path);
+
+            let term = self.terminal_types.lock().unwrap()
+                .get(&channel)
+                .cloned()
+                .unwrap_or_else(|| "xterm".to_string());
+
+            let mut cmd = tokio::process::Command::new(shell_path);
+            cmd.env("TERM", term); 
 
             // Execute low-level PTY linkage before spawning child
             unsafe {
@@ -353,6 +363,7 @@ async fn handle_ssh_session(stream: TcpStream, team_public_key: VerifyingKey) ->
         channels: Arc::new(Mutex::new(HashMap::new())),
         terminal_size: Arc::new(Mutex::new(HashMap::new())),
         pty_masters: Arc::new(Mutex::new(HashMap::new())),
+        terminal_types: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tokio::spawn(async move {
