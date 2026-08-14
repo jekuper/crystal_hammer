@@ -177,6 +177,12 @@ impl russh::server::Handler for AgentServerHandler {
         data: &[u8],
         _session: &mut russh::server::Session,
     ) -> std::result::Result<(), Self::Error> {
+        tracing::trace!(
+            channel = ?channel,
+            bytes = ?data,
+            hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+            "ssh → pty"
+        );
         if let Some(tx) = self.channels.lock().unwrap().get(&channel) {
             let _ = tx.send(data.to_vec());
         }
@@ -259,6 +265,10 @@ impl russh::server::Handler for AgentServerHandler {
             let mut master_write = async_master.try_clone().await?;
             tokio::spawn(async move {
                 while let Some(data) = rx.recv().await {
+                    tracing::trace!(
+                        hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                        "writing to pty master"
+                    );
                     if master_write.write_all(&data).await.is_err() {
                         break;
                     }
@@ -275,6 +285,10 @@ impl russh::server::Handler for AgentServerHandler {
                     match async_master.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            tracing::trace!(
+                                hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
+                                "reading from pty master"
+                            );
                             let _ = handle.data(channel, russh::CryptoVec::from_slice(&buf[..n])).await;
                         }
                     }
