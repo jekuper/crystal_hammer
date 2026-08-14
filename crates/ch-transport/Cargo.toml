@@ -17,3 +17,5 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 async-trait = "0.1"
 base64.workspace = true
+nix.workspace = true
+libc.workspace = true

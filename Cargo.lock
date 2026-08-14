@@ -385,6 +385,8 @@ dependencies = [
  "ch-common",
  "ch-spa",
  "ed25519-dalek",
+ "libc",
+ "nix 0.29.0",
  "rand",
  "russh",
  "russh-keys",

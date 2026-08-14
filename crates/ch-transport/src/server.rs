@@ -141,76 +141,148 @@ impl russh::server::Handler for AgentServerHandler {
         Ok(())
     }
 
-    async fn shell_request(
+        async fn shell_request(
         &mut self,
         channel: russh::ChannelId,
         session: &mut russh::server::Session,
     ) -> std::result::Result<(), Self::Error> {
-        let shell_path = if std::path::Path::new("/bin/bash").exists() {
-            "/bin/bash"
-        } else {
-            "/bin/sh"
-        };
+        #[cfg(unix)]
+        {
+            use nix::pty::openpty;
+            use std::os::fd::IntoRawFd;
+            use std::os::unix::io::FromRawFd;
+            use std::os::unix::process::CommandExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let mut cmd = tokio::process::Command::new(shell_path);
-        
-        cmd.stdin(std::process::Stdio::piped())
-           .stdout(std::process::Stdio::piped())
-           .stderr(std::process::Stdio::piped());
+            let shell_path = if std::path::Path::new("/bin/bash").exists() {
+                "/bin/bash"
+            } else {
+                "/bin/sh"
+            };
 
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to spawn shell process: {:?}", e);
-                return Err(e.into());
+            // Allocate master/slave PTY pair
+            let pty = openpty(None, None)?;
+            let master_fd = pty.master.into_raw_fd();
+            let slave_fd = pty.slave.into_raw_fd();
+
+            let mut cmd = tokio::process::Command::new(shell_path);
+
+            // Execute low-level PTY linkage before spawning child
+            unsafe {
+                cmd.pre_exec(move || {
+                    let _ = nix::unistd::setsid();
+
+                    #[cfg(target_os = "linux")]
+                    {
+                        libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+                    }
+
+                    nix::unistd::dup2(slave_fd, 0)?;
+                    nix::unistd::dup2(slave_fd, 1)?;
+                    nix::unistd::dup2(slave_fd, 2)?;
+
+                    let _ = nix::unistd::close(master_fd);
+                    let _ = nix::unistd::close(slave_fd);
+
+                    Ok(())
+                });
             }
-        };
 
-        let mut stdin = child.stdin.take().expect("Failed to open stdin");
-        let mut stdout = child.stdout.take().expect("Failed to open stdout");
-        let mut stderr = child.stderr.take().expect("Failed to open stderr");
+            let mut child = cmd.spawn()?;
+            let _ = nix::unistd::close(slave_fd);
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        self.channels.lock().unwrap().insert(channel, tx);
+            let master_file = unsafe { std::fs::File::from_raw_fd(master_fd) };
+            let mut async_master = tokio::fs::File::from_std(master_file);
 
-        tokio::spawn(async move {
-            while let Some(data) = rx.recv().await {
-                if stdin.write_all(&data).await.is_err() {
-                    break;
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            self.channels.lock().unwrap().insert(channel, tx);
+
+            // Pipe SSH channel data to PTY stdin
+            let mut master_write = async_master.try_clone().await?;
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if master_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                    let _ = master_write.flush().await;
                 }
-                let _ = stdin.flush().await;
-            }
-        });
+            });
 
-        let handle = session.handle();
-        
-        tokio::spawn(async move {
-            let mut stdout_buf = [0u8; 1024];
-            let mut stderr_buf = [0u8; 1024];
-            loop {
-                tokio::select! {
-                    res = stdout.read(&mut stdout_buf) => {
-                        match res {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                let _ = handle.data(channel, russh::CryptoVec::from_slice(&stdout_buf[..n])).await;
+            // Pipe PTY stdout/stderr back to SSH channel
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match async_master.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let _ = handle.data(channel, russh::CryptoVec::from_slice(&buf[..n])).await;
+                        }
+                    }
+                }
+                let _ = handle.close(channel).await;
+                let _ = child.kill().await;
+            });
+
+            Ok(())
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Non-Unix compilation fallback (uses raw pipes)
+            tracing::warn!("Allocating standard piped shell fallback on non-Unix platform");
+            let mut cmd = tokio::process::Command::new("cmd.exe");
+            cmd.stdin(std::process::Stdio::piped())
+               .stdout(std::process::Stdio::piped())
+               .stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn()?;
+            let mut stdin = child.stdin.take().expect("Failed to open stdin");
+            let mut stdout = child.stdout.take().expect("Failed to open stdout");
+            let mut stderr = child.stderr.take().expect("Failed to open stderr");
+
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            self.channels.lock().unwrap().insert(channel, tx);
+
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if stdin.write_all(&data).await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+            });
+
+            let handle = session.handle();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut stdout_buf = [0u8; 1024];
+                let mut stderr_buf = [0u8; 1024];
+                loop {
+                    tokio::select! {
+                        res = stdout.read(&mut stdout_buf) => {
+                            match res {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let _ = handle.data(channel, russh::CryptoVec::from_slice(&stdout_buf[..n])).await;
+                                }
+                            }
+                        }
+                        res = stderr.read(&mut stderr_buf) => {
+                            match res {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    let _ = handle.extended_data(channel, 1, russh::CryptoVec::from_slice(&stderr_buf[..n])).await;
+                                }
                             }
                         }
                     }
-                    res = stderr.read(&mut stderr_buf) => {
-                        match res {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                let _ = handle.extended_data(channel, 1, russh::CryptoVec::from_slice(&stderr_buf[..n])).await;
-                            }
-                        }
-                    }
                 }
-            }
-            let _ = handle.close(channel).await;
-        });
+                let _ = handle.close(channel).await;
+            });
 
-        Ok(())
+            Ok(())
+        }
     }
 }
 
