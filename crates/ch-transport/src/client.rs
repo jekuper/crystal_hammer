@@ -12,6 +12,21 @@ use tokio::net::TcpStream;
 
 use crate::proxy::Hop;
 
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> Self {
+        let _ = crossterm::terminal::enable_raw_mode();
+        RawModeGuard
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 /// Target address, possibly reached through a proxy chain.
 #[derive(Debug, Clone)]
 pub struct Target {
@@ -135,6 +150,9 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     tracing::info!("Interactive PTY shell allocated");
+
+    // Enable raw mode to synchronize echoing and line buffering
+    let _raw_mode_guard = RawModeGuard::new();
 
     use tokio::io::AsyncReadExt;
     let mut stdin = tokio::io::stdin();
