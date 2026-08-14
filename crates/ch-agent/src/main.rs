@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
 fn is_root() -> bool {
     #[cfg(target_os = "linux")]
     {
+        use nix::unistd::Uid;
         let uid = Uid::current();
         if uid.is_root() {
             println!("Running as root");
