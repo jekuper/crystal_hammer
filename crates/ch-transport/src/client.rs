@@ -50,7 +50,7 @@ pub struct OperatorKeyPair {
 }
 
 /// Handler for the russh client session.
-struct ClientHandler {
+pub struct ClientHandler {
     expected_key: VerifyingKey,
     // Shared container holding the active shell's shutdown signal sender
     close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -301,6 +301,11 @@ async fn run_operator_repl(
                             eprintln!("Shell session error: {:?}", e);
                         }
                     }
+                    "info" => {
+                        if let Err(e) = run_info(&mut session, shell_close_tx.clone()).await {
+                            eprintln!("Info command error: {:?}", e);
+                        }
+                    }
                     "help" => {
                         println!("Available commands:");
                         println!("  shell - Start interactive root shell");
@@ -328,12 +333,45 @@ async fn run_operator_repl(
     Ok(())
 }
 
-async fn run_interactive_shell(
+async fn run_info(
     session: &mut Handle<ClientHandler>,
     shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 ) -> anyhow::Result<()> {
     // Open session channel asynchronously (returns an async Future)
     let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    
+    channel.exec(true, "ch_info").await?;
+
+    // Read the output from the agent
+    let mut response = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { data } => {
+                response.extend_from_slice(&data);
+            }
+            russh::ChannelMsg::Eof => break,
+            _ => {}
+        }
+    }
+    
+    // Print the output locally
+    let info_str = String::from_utf8_lossy(&response);
+    println!("{}", info_str);
+    
+    // The channel is closed, but the outer `session` remains open and usable
+    Ok(())
+}
+
+
+async fn run_interactive_shell(
+    session: &mut Handle<ClientHandler>,
+    shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+) -> anyhow::Result<()> {
+    // Open session channel asynchronously (returns an async Future)
+    let channel = session
         .channel_open_session()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

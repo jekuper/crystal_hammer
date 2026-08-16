@@ -299,6 +299,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ch-commands"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ch-common",
+ "ch-store",
+ "ch-transport",
+ "russh",
+ "russh-keys",
+ "rustyline",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ch-common"
 version = "0.0.1"
 dependencies = [

@@ -11,6 +11,7 @@ members = [
     "crates/ch-monitor",
     "crates/ch-agent",
     "crates/ch-client",
+    "crates/ch-commands",
 ]
 
 [workspace.package]
@@ -54,6 +55,7 @@ nix = { version = "0.29", features = ["fs", "user", "process", "term"] }
 libc = "0.2"
 crossterm = "0.28"
 rustyline = "14"
+async-trait = "0.1"
 
 # Internal crates
 ch-common = { path = "crates/ch-common" }
@@ -64,6 +66,7 @@ ch-spa = { path = "crates/ch-spa" }
 ch-transport = { path = "crates/ch-transport" }
 ch-persistence = { path = "crates/ch-persistence" }
 ch-monitor = { path = "crates/ch-monitor" }
+ch-commands = { path = "crates/ch-commands" }
 
 [profile.release]
 # Static IR tool: prefer small, self-contained artifacts.

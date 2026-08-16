@@ -32,3 +32,16 @@ pub enum Event {
     /// Human-readable status line.
     Status(String),
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CommandEvent {
+    /// Progress update for file transfers or long-running sweeps
+    Progress { current: u64, total: u64 },
+    /// Non-fatal warnings or diagnostic status updates
+    Status(String),
+    /// Structured data payloads (e.g. process lists or port scans)
+    Payload(serde_json::Value),
+    /// Signal completion with exit code
+    Exit(i32),
+}

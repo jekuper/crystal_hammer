@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use ch_common::Result;
 use ch_spa::{Knock, NonceCache};
 use ed25519_dalek::{Signature, VerifyingKey};
+use russh::ChannelId;
+use russh::server::Session;
 use russh_keys::PublicKeyBase64;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -358,6 +360,36 @@ impl russh::server::Handler for AgentServerHandler {
             Ok(())
         }
     }
+
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> std::result::Result<(), Self::Error> {
+
+        // If it succeeds, valid_str is bound. If it fails, the else block runs.
+        let Ok(valid_str) = std::str::from_utf8(data) else {
+            session.channel_failure(channel); 
+            
+            // 2. Return your custom error type
+             let original_error = std::str::from_utf8(data).unwrap_err();
+            return Err(russh::Error::Utf8(original_error).into()); 
+        };
+        
+        match valid_str {
+            "ch_info" => {
+                
+            }
+            other => {
+            }
+        }
+
+        session.channel_success(channel);
+        Ok(())
+    }
+
 }
 
 /// Upgrades the raw TCP stream directly into standard SSH protocol loop.
