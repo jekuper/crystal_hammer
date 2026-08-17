@@ -115,6 +115,8 @@ struct AgentServerHandler {
     team_public_key: VerifyingKey,
     channels: Arc<Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<Vec<u8>>>>>,
     terminal_size: Arc<Mutex<HashMap<russh::ChannelId, (u32, u32)>>>,
+    #[cfg(unix)]
+    pty_masters: Arc<Mutex<HashMap<russh::ChannelId, RawFd>>>,
     terminal_types: Arc<Mutex<HashMap<russh::ChannelId, String>>>, 
     executor: Arc<dyn CommandExecutor>,
 }
@@ -479,6 +481,8 @@ async fn handle_ssh_session(
         team_public_key,
         channels: Arc::new(Mutex::new(HashMap::new())),
         terminal_size: Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(unix)]
+        pty_masters: Arc::new(Mutex::new(HashMap::new())),
         terminal_types: Arc::new(Mutex::new(HashMap::new())),
         executor,
     };
