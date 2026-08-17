@@ -1,3 +1,4 @@
+// File: crates/ch-transport/src/server.rs
 //! Agent-side listener: holds the port dark, validates knocks, and spawns sessions.
 
 use async_trait::async_trait;
@@ -365,11 +366,8 @@ impl russh::server::Handler for AgentServerHandler {
         session: &mut Session,
     ) -> std::result::Result<(), Self::Error> {
 
-        // If it succeeds, valid_str is bound. If it fails, the else block runs.
         let Ok(valid_str) = std::str::from_utf8(data) else {
             session.channel_failure(channel); 
-            
-            // 2. Return your custom error type
              let original_error = std::str::from_utf8(data).unwrap_err();
             return Err(russh::Error::Utf8(original_error).into()); 
         };
@@ -395,15 +393,15 @@ impl russh::server::Handler for AgentServerHandler {
         let handle_stdout = session.handle();
         let handle_stderr = session.handle();
 
-        // Spawn stdout forwarder task
-        tokio::spawn(async move {
+        // Spawn stdout forwarder task and track its JoinHandle
+        let stdout_forwarder = tokio::spawn(async move {
             while let Some(chunk) = stdout_rx.recv().await {
                 let _ = handle_stdout.data(channel, russh::CryptoVec::from_slice(&chunk)).await;
             }
         });
 
-        // Spawn stderr forwarder task
-        tokio::spawn(async move {
+        // Spawn stderr forwarder task and track its JoinHandle
+        let stderr_forwarder = tokio::spawn(async move {
             while let Some(chunk) = stderr_rx.recv().await {
                 let _ = handle_stderr.extended_data(channel, 1, russh::CryptoVec::from_slice(&chunk)).await;
             }
@@ -419,6 +417,9 @@ impl russh::server::Handler for AgentServerHandler {
             if let Err(e) = res {
                 tracing::error!("Command execution failed: {}", e);
             }
+            // Wait for both background forwarder tasks to finish sending all data before closing
+            let _ = stdout_forwarder.await;
+            let _ = stderr_forwarder.await;
             let _ = handle_close.close(channel).await;
         });
 
