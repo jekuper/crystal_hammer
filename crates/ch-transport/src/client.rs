@@ -336,6 +336,11 @@ async fn run_operator_repl(
                         if let Err(e) = executor.execute(other, args, &mut session).await { // <--- Pass &mut
                             eprintln!("Error: {}", e);
                         }
+                        
+                        // Explicitly flush both stdout handles to clear any remaining buffers
+                        let _ = tokio::io::stdout().flush().await;
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
                     }
                 }
             }
