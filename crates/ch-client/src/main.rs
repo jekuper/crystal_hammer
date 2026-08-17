@@ -3,6 +3,36 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ch_transport::{connect, Hop, Target};
+use std::sync::Arc;
+
+struct LocalExecutor {
+    registry: ch_commands::model::ClientCommandRegistry,
+}
+
+#[async_trait::async_trait]
+impl ch_transport::ClientCommandExecutor for LocalExecutor {
+    async fn execute(
+        &self,
+        command: &str,
+        args: &[String],
+        session: &mut russh::client::Handle<ch_transport::client::ClientHandler>, // <--- Update signature
+    ) -> std::result::Result<(), String> {
+        if command == "help" {
+            println!("Registered commands:");
+            println!("  info  - Fetch host info (supports --users)");
+            return Ok(());
+        }
+
+        if let Some(cmd) = self.registry.find(command) {
+            let ctx = ch_commands::model::ClientContext { session }; // <--- Borrow naturally
+            cmd.execute(args, ctx)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            Err(format!("Unknown command: '{}'", command))
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "crystal-hammer", version = "0.0.1", about = "Crystal Hammer Operator Client")]
@@ -62,7 +92,10 @@ async fn main() -> Result<()> {
         hops.push(Hop::Jump { host, port });
     }
 
-    connect(&target, &hops).await.context("Failed to connect to agent")?;
+    let registry = ch_commands::model::ClientCommandRegistry::with_builtins();
+    let executor = Arc::new(LocalExecutor { registry });
+
+    connect(&target, &hops, executor).await.context("Failed to connect to agent")?;
 
     Ok(())
 }

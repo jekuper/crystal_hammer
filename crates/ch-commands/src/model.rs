@@ -17,13 +17,17 @@ pub trait AgentCommand: Send + Sync {
     async fn execute(&self, args: Vec<String>, ctx: Context) -> Result<()>;
 }
 
+pub struct ClientContext<'a> {
+    pub session: &'a mut Handle<ClientHandler>,
+}
+
 #[async_trait]
-pub trait ClientCommand {
+pub trait ClientCommand: Send + Sync {
     /// Command keyword typed by the operator (e.g. "upload")
     fn name(&self) -> &'static str;
     
     /// Execute client-side logic, interacting with the active session
-    async fn execute(&self, args: &[String], session: &mut Handle<ClientHandler>) -> Result<()>;
+    async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
 }
 
 pub struct AgentCommandRegistry {
@@ -39,6 +43,10 @@ impl AgentCommandRegistry {
 
     pub fn register(&mut self, command: Box<dyn AgentCommand>) {
         self.commands.push(command);
+    }
+
+    pub fn find(&self, name: &str) -> Option<&dyn AgentCommand> {
+        self.commands.iter().map(|b| b.as_ref()).find(|c| c.name() == name)
     }
 }
 
@@ -56,8 +64,11 @@ impl ClientCommandRegistry {
     pub fn register(&mut self, command: Box<dyn ClientCommand>) {
         self.commands.push(command);
     }
-}
 
+    pub fn find(&self, name: &str) -> Option<&dyn ClientCommand> {
+        self.commands.iter().map(|b| b.as_ref()).find(|c| c.name() == name)
+    }
+}
 
 pub struct Context {
     /// Inbound stream from the client (for script inputs or file uploads)

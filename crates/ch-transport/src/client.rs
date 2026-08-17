@@ -36,6 +36,17 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Dynamic Command Execution abstraction to resolve circular crate dependencies
+#[async_trait]
+pub trait ClientCommandExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        command: &str,
+        args: &[String],
+        session: &mut Handle<ClientHandler>,
+    ) -> std::result::Result<(), String>;
+}
+
 /// Target address, possibly reached through a proxy chain.
 #[derive(Debug, Clone)]
 pub struct Target {
@@ -50,6 +61,7 @@ pub struct OperatorKeyPair {
 }
 
 /// Handler for the russh client session.
+#[derive(Clone)]
 pub struct ClientHandler {
     expected_key: VerifyingKey,
     // Shared container holding the active shell's shutdown signal sender
@@ -216,7 +228,7 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
 }
 
 /// Connect to an agent: knock, then russh handshake with host-key pinning.
-pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
+pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientCommandExecutor>) -> Result<()> {
     tracing::info!("Connecting to {}:{}", target.host, target.port);
 
     let keypair = load_operator_keypair()?;
@@ -263,8 +275,7 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
 
     tracing::info!("Authenticated SSH session established");
 
-    // We await the REPL session to execute it
-    run_operator_repl(session, shell_close_tx)
+    run_operator_repl(session, shell_close_tx, executor)
         .await
         .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
@@ -274,6 +285,7 @@ pub async fn connect(target: &Target, via: &[Hop]) -> Result<()> {
 async fn run_operator_repl(
     mut session: Handle<ClientHandler>,
     shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    executor: Arc<dyn ClientCommandExecutor>,
 ) -> anyhow::Result<()> {
     let mut rl = DefaultEditor::new()?;
     
@@ -290,7 +302,19 @@ async fn run_operator_repl(
                 
                 let _ = rl.add_history_entry(input);
 
-                match input {
+                let parts: Vec<String> = input
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                if parts.is_empty() {
+                    continue;
+                }
+
+                let cmd_name = &parts[0];
+                let args = &parts[1..];
+
+                match cmd_name.as_str() {
                     "exit" | "quit" => {
                         println!("Closing session...");
                         break;
@@ -301,19 +325,17 @@ async fn run_operator_repl(
                             eprintln!("Shell session error: {:?}", e);
                         }
                     }
-                    "info" => {
-                        if let Err(e) = run_info(&mut session, shell_close_tx.clone()).await {
-                            eprintln!("Info command error: {:?}", e);
-                        }
-                    }
                     "help" => {
                         println!("Available commands:");
                         println!("  shell - Start interactive root shell");
                         println!("  exit  - Close session and exit client");
                         println!("  help  - Show this help menu");
+                        let _ = executor.execute("help", &[], &mut session).await; // <--- Pass &mut
                     }
                     other => {
-                        println!("Unknown command: '{}'. Type 'help' for commands.", other);
+                        if let Err(e) = executor.execute(other, args, &mut session).await { // <--- Pass &mut
+                            eprintln!("Error: {}", e);
+                        }
                     }
                 }
             }
@@ -332,39 +354,6 @@ async fn run_operator_repl(
 
     Ok(())
 }
-
-async fn run_info(
-    session: &mut Handle<ClientHandler>,
-    shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
-) -> anyhow::Result<()> {
-    // Open session channel asynchronously (returns an async Future)
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    
-    channel.exec(true, "ch_info").await?;
-
-    // Read the output from the agent
-    let mut response = Vec::new();
-    while let Some(msg) = channel.wait().await {
-        match msg {
-            russh::ChannelMsg::Data { data } => {
-                response.extend_from_slice(&data);
-            }
-            russh::ChannelMsg::Eof => break,
-            _ => {}
-        }
-    }
-    
-    // Print the output locally
-    let info_str = String::from_utf8_lossy(&response);
-    println!("{}", info_str);
-    
-    // The channel is closed, but the outer `session` remains open and usable
-    Ok(())
-}
-
 
 async fn run_interactive_shell(
     session: &mut Handle<ClientHandler>,

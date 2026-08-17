@@ -1,11 +1,9 @@
 use std::fs;
 use async_trait::async_trait;
 use ch_common::Result;
-use ch_transport::client::ClientHandler;
-use russh::client::Handle;
 use tokio::io::AsyncWriteExt;
 
-use crate::model::{AgentCommand, ClientCommand, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
 
 pub struct InfoAgentCommand {}
 
@@ -92,6 +90,10 @@ impl AgentCommand for InfoAgentCommand {
         report.push_str(&format!("Auth Failures:      {}\n", self.get_recent_auth_failures()));
         report.push_str(&format!("Persistence Health: {}\n", self.get_persistence_health()));
 
+        if show_users {
+            report.push_str("\n--- Detailed Users requested (Stub) ---\n");
+        }
+
         ctx.stdout.write_all(report.as_bytes()).await?;
         Ok(())
     }
@@ -112,15 +114,19 @@ impl InfoClientCommand {
 impl ClientCommand for InfoClientCommand {
     fn name(&self) -> &'static str { "info" }
 
-    async fn execute(&self, args: &[String], session: &mut Handle<ClientHandler>) -> Result<()> {
-        
-        // 2. Open an isolated SSH channel
+    async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+        let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
-        
-        let exec_payload = format!("info");
+        // Properly join arguments to avoid skipping
+        let exec_payload = if args.is_empty() {
+            "info".to_string()
+        } else {
+            format!("info {}", args.join(" "))
+        };
+
         channel.exec(true, exec_payload.as_bytes()).await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 

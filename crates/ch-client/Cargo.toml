@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 ch-common.workspace = true
 ch-transport.workspace = true
+ch-commands.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -19,4 +20,5 @@ tracing-subscriber.workspace = true
 russh.workspace = true
 russh-keys.workspace = true
 rustyline.workspace = true
+async-trait.workspace = true
 clap = { version = "4", features = ["derive"] }
