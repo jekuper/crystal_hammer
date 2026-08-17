@@ -64,8 +64,6 @@ pub struct OperatorKeyPair {
 #[derive(Clone)]
 pub struct ClientHandler {
     expected_key: VerifyingKey,
-    // Shared container holding the active shell's shutdown signal sender
-    close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 #[async_trait]
@@ -86,53 +84,6 @@ impl russh::client::Handler for ClientHandler {
             tracing::warn!("Unpinned server host key received");
             Ok(true)
         }
-    }
-
-    async fn data(
-        &mut self,
-        _channel: russh::ChannelId,
-        data: &[u8],
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        let mut stdout = tokio::io::stdout();
-        stdout.write_all(data).await?;
-        stdout.flush().await?;
-        Ok(())
-    }
-
-    async fn extended_data(
-        &mut self,
-        _channel: russh::ChannelId,
-        _ext: u32,
-        data: &[u8],
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        let mut stderr = tokio::io::stderr();
-        stderr.write_all(data).await?;
-        stderr.flush().await?;
-        Ok(())
-    }
-
-    async fn channel_close(
-        &mut self,
-        _channel: russh::ChannelId,
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        if let Some(tx) = self.close_tx.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        Ok(())
-    }
-
-    async fn channel_eof(
-        &mut self,
-        _channel: russh::ChannelId,
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        if let Some(tx) = self.close_tx.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-        Ok(())
     }
 }
 
@@ -246,15 +197,10 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
     };
     let config = Arc::new(config);
 
-    // Create the shared dynamic signal slot
-    let shell_close_tx = Arc::new(std::sync::Mutex::new(None));
-
     let handler = ClientHandler {
         expected_key: keypair.public,
-        close_tx: shell_close_tx.clone(),
     };
 
-    // Declared mutable to allow .authenticate_publickey()
     let mut session = russh::client::connect_stream(config, stream, handler)
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -275,7 +221,7 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
 
     tracing::info!("Authenticated SSH session established");
 
-    run_operator_repl(session, shell_close_tx, executor)
+    run_operator_repl(session, executor)
         .await
         .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
@@ -284,7 +230,6 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
 
 async fn run_operator_repl(
     mut session: Handle<ClientHandler>,
-    shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     executor: Arc<dyn ClientCommandExecutor>,
 ) -> anyhow::Result<()> {
     let mut rl = DefaultEditor::new()?;
@@ -321,7 +266,7 @@ async fn run_operator_repl(
                     }
                     "shell" => {
                         println!("Spawning interactive shell. Type 'exit' to return to console.");
-                        if let Err(e) = run_interactive_shell(&mut session, shell_close_tx.clone()).await {
+                        if let Err(e) = run_interactive_shell(&mut session).await {
                             eprintln!("Shell session error: {:?}", e);
                         }
                     }
@@ -330,17 +275,12 @@ async fn run_operator_repl(
                         println!("  shell - Start interactive root shell");
                         println!("  exit  - Close session and exit client");
                         println!("  help  - Show this help menu");
-                        let _ = executor.execute("help", &[], &mut session).await; // <--- Pass &mut
+                        let _ = executor.execute("help", &[], &mut session).await;
                     }
                     other => {
-                        if let Err(e) = executor.execute(other, args, &mut session).await { // <--- Pass &mut
+                        if let Err(e) = executor.execute(other, args, &mut session).await {
                             eprintln!("Error: {}", e);
                         }
-                        
-                        // Explicitly flush both stdout handles to clear any remaining buffers
-                        let _ = tokio::io::stdout().flush().await;
-                        use std::io::Write;
-                        let _ = std::io::stdout().flush();
                     }
                 }
             }
@@ -362,10 +302,8 @@ async fn run_operator_repl(
 
 async fn run_interactive_shell(
     session: &mut Handle<ClientHandler>,
-    shell_close_tx: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 ) -> anyhow::Result<()> {
-    // Open session channel asynchronously (returns an async Future)
-    let channel = session
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -386,10 +324,6 @@ async fn run_interactive_shell(
 
     tracing::info!("Interactive PTY shell allocated");
 
-    // Prepare a fresh oneshot channel for this specific shell session
-    let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
-    *shell_close_tx.lock().unwrap() = Some(tx);
-
     let _raw_mode_guard = RawModeGuard::new();
 
     #[cfg(unix)]
@@ -409,9 +343,30 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                _ = &mut rx => {
-                    tracing::info!("Session closed by remote host");
-                    break;
+                msg = channel.wait() => {
+                    let Some(channel_msg) = msg else {
+                        break;
+                    };
+                    match channel_msg {
+                        russh::ChannelMsg::Data { data } => {
+                            let mut stdout = tokio::io::stdout();
+                            if stdout.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            let _ = stdout.flush().await;
+                        }
+                        russh::ChannelMsg::ExtendedData { data, ext: _ } => {
+                            let mut stderr = tokio::io::stderr();
+                            if stderr.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            let _ = stderr.flush().await;
+                        }
+                        russh::ChannelMsg::Eof => {
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
                 Some(_) = async {
                     if let Some(ref mut sig) = sigwinch {
@@ -485,9 +440,30 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                _ = &mut rx => {
-                    tracing::info!("Session closed by remote host");
-                    break;
+                msg = channel.wait() => {
+                    let Some(channel_msg) = msg else {
+                        break;
+                    };
+                    match channel_msg {
+                        russh::ChannelMsg::Data { data } => {
+                            let mut stdout = tokio::io::stdout();
+                            if stdout.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            let _ = stdout.flush().await;
+                        }
+                        russh::ChannelMsg::ExtendedData { data, ext: _ } => {
+                            let mut stderr = tokio::io::stderr();
+                            if stderr.write_all(&data).await.is_err() {
+                                break;
+                            }
+                            let _ = stderr.flush().await;
+                        }
+                        russh::ChannelMsg::Eof => {
+                            break;
+                        }
+                        _ => {}
+                    }
                 }
                 res = stdin_rx.recv() => {
                     match res {
@@ -506,9 +482,6 @@ async fn run_interactive_shell(
             }
         }
     }
-
-    // Clean up our sender registration once the shell is finished
-    *shell_close_tx.lock().unwrap() = None;
 
     Ok(())
 }

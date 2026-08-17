@@ -143,6 +143,8 @@ impl ClientCommand for InfoClientCommand {
                         .map(|v| v.to_string())
                         .unwrap_or_default();
                     print!("{}", s);
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
                 }
                 russh::ChannelMsg::Eof => {
                     break;
