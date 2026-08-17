@@ -112,10 +112,15 @@ impl InfoClientCommand {
 #[async_trait]
 impl ClientCommand for InfoClientCommand {
     fn name(&self) -> &'static str { "info" }
+    fn short_description(&self) -> &'static str { "Fetch host info" }
+    fn help(&self) -> &'static str { 
+    "info command allows you to fetch information about the host
+    newline test" 
+    }
 
     async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
         let session = ctx.session;
-        let mut channel = session.channel_open_session()
+        let channel = session.channel_open_session()
             .await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
@@ -123,10 +128,12 @@ impl ClientCommand for InfoClientCommand {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         ch_transport::client::register_sink(channel.id(), tx);
 
+        let server_command = InfoAgentCommand::new();
+
         let exec_payload = if args.is_empty() {
-            "info".to_string()
+            server_command.name().to_string()
         } else {
-            format!("info {}", args.join(" "))
+            format!("{} {}", server_command.name(), args.join(" "))
         };
 
         channel.exec(true, exec_payload.as_bytes()).await

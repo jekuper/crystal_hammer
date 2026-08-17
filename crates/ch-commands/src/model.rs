@@ -25,6 +25,10 @@ pub struct ClientContext<'a> {
 pub trait ClientCommand: Send + Sync {
     /// Command keyword typed by the operator (e.g. "upload")
     fn name(&self) -> &'static str;
+
+    fn short_description(&self) -> &'static str;
+
+    fn help(&self) -> &'static str;
     
     /// Execute client-side logic, interacting with the active session
     async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
@@ -67,6 +71,35 @@ impl ClientCommandRegistry {
 
     pub fn find(&self, name: &str) -> Option<&dyn ClientCommand> {
         self.commands.iter().map(|b| b.as_ref()).find(|c| c.name() == name)
+    }
+
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            inner: self.commands.iter(),
+        }
+    }
+}
+
+/// An iterator over the commands in a `ClientCommandRegistry`.
+pub struct Iter<'a> {
+    inner: std::slice::Iter<'a, Box<dyn ClientCommand>>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a dyn ClientCommand;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|b| b.as_ref())
+    }
+}
+
+/// Allows iterating over references to the registry, e.g., `for cmd in &registry`
+impl<'a> IntoIterator for &'a ClientCommandRegistry {
+    type Item = &'a dyn ClientCommand;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 

@@ -395,7 +395,7 @@ async fn run_operator_repl(
 async fn run_interactive_shell(
     session: &mut Handle<ClientHandler>,
 ) -> anyhow::Result<()> {
-    let mut channel = session
+    let channel = session
         .channel_open_session()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

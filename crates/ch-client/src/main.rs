@@ -19,7 +19,14 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
     ) -> std::result::Result<(), String> {
         if command == "help" {
             println!("Registered commands:");
-            println!("  info  - Fetch host info (supports --users)");
+            let mut help_summary = "".to_string();
+            for command in self.registry.iter() {
+                help_summary.push_str(command.name());
+                help_summary.push_str(" - ");
+                help_summary.push_str(command.short_description());
+                help_summary.push_str("\n");
+            }
+            println!("{}", help_summary);
             return Ok(());
         }
 
