@@ -7,10 +7,12 @@ use ch_spa::Knock;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use russh::client::Handle;
 use russh_keys::PublicKeyBase64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashMap;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 use rustyline::DefaultEditor;
 
@@ -60,6 +62,32 @@ pub struct OperatorKeyPair {
     pub secret: SigningKey,
 }
 
+/// Multiplexed channel event routing
+#[derive(Debug, Clone)]
+pub enum ChannelEvent {
+    Data(Vec<u8>),
+    ExtendedData(Vec<u8>, u32),
+    Eof,
+    Close,
+}
+
+type SinksMap = Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<ChannelEvent>>>;
+
+fn channel_sinks() -> &'static SinksMap {
+    static SINKS: OnceLock<SinksMap> = OnceLock::new();
+    SINKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers an active foreground receiver for a specific SSH channel
+pub fn register_sink(id: russh::ChannelId, tx: mpsc::UnboundedSender<ChannelEvent>) {
+    channel_sinks().lock().unwrap().insert(id, tx);
+}
+
+/// Unregisters a foreground receiver when a command completes
+pub fn unregister_sink(id: russh::ChannelId) {
+    channel_sinks().lock().unwrap().remove(&id);
+}
+
 /// Handler for the russh client session.
 #[derive(Clone)]
 pub struct ClientHandler {
@@ -85,6 +113,75 @@ impl russh::client::Handler for ClientHandler {
             Ok(true)
         }
     }
+
+    async fn data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        // Scoped block to ensure the MutexGuard is dropped before the await point
+        let sender = {
+            let sinks = channel_sinks().lock().unwrap();
+            sinks.get(&channel).cloned()
+        };
+
+        if let Some(tx) = sender {
+            let _ = tx.send(ChannelEvent::Data(data.to_vec()));
+        } else {
+            let mut stdout = tokio::io::stdout();
+            stdout.write_all(data).await?;
+            stdout.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn extended_data(
+        &mut self,
+        channel: russh::ChannelId,
+        ext: u32,
+        data: &[u8],
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        // Scoped block to ensure the MutexGuard is dropped before the await point
+        let sender = {
+            let sinks = channel_sinks().lock().unwrap();
+            sinks.get(&channel).cloned()
+        };
+
+        if let Some(tx) = sender {
+            let _ = tx.send(ChannelEvent::ExtendedData(data.to_vec(), ext));
+        } else {
+            let mut stderr = tokio::io::stderr();
+            stderr.write_all(data).await?;
+            stderr.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: russh::ChannelId,
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let sinks = channel_sinks().lock().unwrap();
+        if let Some(tx) = sinks.get(&channel) {
+            let _ = tx.send(ChannelEvent::Eof);
+        }
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: russh::ChannelId,
+        _session: &mut russh::client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let sinks = channel_sinks().lock().unwrap();
+        if let Some(tx) = sinks.get(&channel) {
+            let _ = tx.send(ChannelEvent::Close);
+        }
+        Ok(())
+    }
 }
 
 /// Set O_NONBLOCK on a raw fd so it can be driven by tokio's `AsyncFd`.
@@ -102,19 +199,14 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> std::io::Result<()> {
 }
 
 /// Translates Crossterm KeyEvents into raw ANSI terminal byte sequences.
-///
-/// Only used on non-unix targets, where there is no `/dev/tty` to read raw
-/// bytes from. On unix we forward the terminal's own byte stream verbatim.
 #[cfg(not(unix))]
 fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
-    // Ignore key release events (prominent on Windows)
     if key.kind == crossterm::event::KeyEventKind::Release {
         return None;
     }
 
     let mut bytes = Vec::new();
 
-    // Translate Control character sequences (e.g. Ctrl+C -> 0x03)
     if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
         match key.code {
             crossterm::event::KeyCode::Char(c) => {
@@ -140,7 +232,7 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
             bytes.push(b'\t');
         }
         crossterm::event::KeyCode::Backspace => {
-            bytes.push(127); // Standard DEL control byte for backspace
+            bytes.push(127);
         }
         crossterm::event::KeyCode::Esc => {
             bytes.push(27);
@@ -310,13 +402,11 @@ async fn run_interactive_shell(
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
-    // Request PTY directly on the channel
     channel
         .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    // Request Shell directly on the channel
     channel
         .request_shell(true)
         .await
@@ -324,16 +414,14 @@ async fn run_interactive_shell(
 
     tracing::info!("Interactive PTY shell allocated");
 
+    // Register a local multiplex sink for the interactive shell channel
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    register_sink(channel.id(), tx);
+
     let _raw_mode_guard = RawModeGuard::new();
 
     #[cfg(unix)]
     {
-        // Read raw terminal bytes directly from the controlling terminal.
-        // crossterm's raw mode above applies to /dev/tty, so this fd sees the
-        // same un-cooked byte stream — every escape sequence intact. Forwarding
-        // opaque bytes means application-cursor mode (DECCKM), terminal query
-        // responses, modified arrows, Meta bindings, and bracketed paste all
-        // pass through without the client needing to know remote terminal state.
         let tty = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
         set_nonblocking(tty.as_raw_fd())?;
         let async_tty = AsyncFd::new(tty)?;
@@ -343,29 +431,28 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                msg = channel.wait() => {
-                    let Some(channel_msg) = msg else {
+                event = rx.recv() => {
+                    let Some(channel_event) = event else {
                         break;
                     };
-                    match channel_msg {
-                        russh::ChannelMsg::Data { data } => {
+                    match channel_event {
+                        ChannelEvent::Data(data) => {
                             let mut stdout = tokio::io::stdout();
                             if stdout.write_all(&data).await.is_err() {
                                 break;
                             }
                             let _ = stdout.flush().await;
                         }
-                        russh::ChannelMsg::ExtendedData { data, ext: _ } => {
+                        ChannelEvent::ExtendedData(data, _) => {
                             let mut stderr = tokio::io::stderr();
                             if stderr.write_all(&data).await.is_err() {
                                 break;
                             }
                             let _ = stderr.flush().await;
                         }
-                        russh::ChannelMsg::Eof => {
+                        ChannelEvent::Eof | ChannelEvent::Close => {
                             break;
                         }
-                        _ => {}
                     }
                 }
                 Some(_) = async {
@@ -399,7 +486,7 @@ async fn run_interactive_shell(
                     });
 
                     match read_result {
-                        Ok(Ok(0)) => break,            // EOF on the tty
+                        Ok(Ok(0)) => break,
                         Ok(Ok(n)) => {
                             tracing::trace!(
                                 hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
@@ -409,8 +496,8 @@ async fn run_interactive_shell(
                                 break;
                             }
                         }
-                        Ok(Err(_)) => break,           // real read error
-                        Err(_would_block) => continue, // readiness was spurious; re-arm
+                        Ok(Err(_)) => break,
+                        Err(_would_block) => continue,
                     }
                 }
             }
@@ -419,8 +506,6 @@ async fn run_interactive_shell(
 
     #[cfg(not(unix))]
     {
-        // No /dev/tty on non-unix: decode key events with crossterm and
-        // re-encode them into terminal byte sequences on a blocking thread.
         let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
         std::thread::spawn(move || {
             loop {
@@ -432,7 +517,7 @@ async fn run_interactive_shell(
                             }
                         }
                     }
-                    Ok(_) => {} // Ignore focus, mouse, and resize events
+                    Ok(_) => {}
                     Err(_) => break,
                 }
             }
@@ -440,29 +525,28 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                msg = channel.wait() => {
-                    let Some(channel_msg) = msg else {
+                event = rx.recv() => {
+                    let Some(channel_event) = event else {
                         break;
                     };
-                    match channel_msg {
-                        russh::ChannelMsg::Data { data } => {
+                    match channel_event {
+                        ChannelEvent::Data(data) => {
                             let mut stdout = tokio::io::stdout();
                             if stdout.write_all(&data).await.is_err() {
                                 break;
                             }
                             let _ = stdout.flush().await;
                         }
-                        russh::ChannelMsg::ExtendedData { data, ext: _ } => {
+                        ChannelEvent::ExtendedData(data, _) => {
                             let mut stderr = tokio::io::stderr();
                             if stderr.write_all(&data).await.is_err() {
                                 break;
                             }
                             let _ = stderr.flush().await;
                         }
-                        russh::ChannelMsg::Eof => {
+                        ChannelEvent::Eof | ChannelEvent::Close => {
                             break;
                         }
-                        _ => {}
                     }
                 }
                 res = stdin_rx.recv() => {
@@ -483,6 +567,7 @@ async fn run_interactive_shell(
         }
     }
 
+    unregister_sink(channel.id());
     Ok(())
 }
 
@@ -663,7 +748,7 @@ fn parse_private_key(raw_bytes: &[u8]) -> Option<OperatorKeyPair> {
     }
 
     None
-}
+}   
 
 fn generate_nonce() -> [u8; 16] {
     use rand::RngCore;

@@ -109,7 +109,6 @@ impl InfoClientCommand {
     }
 }
 
-
 #[async_trait]
 impl ClientCommand for InfoClientCommand {
     fn name(&self) -> &'static str { "info" }
@@ -120,7 +119,10 @@ impl ClientCommand for InfoClientCommand {
             .await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
-        // Properly join arguments to avoid skipping
+        // Allocate a thread-safe message sink for our channel
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ch_transport::client::register_sink(channel.id(), tx);
+
         let exec_payload = if args.is_empty() {
             "info".to_string()
         } else {
@@ -130,15 +132,10 @@ impl ClientCommand for InfoClientCommand {
         channel.exec(true, exec_payload.as_bytes()).await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
-        loop {
-            let msg = channel.wait().await; 
-            
-            let Some(channel_msg) = msg else { 
-                break; 
-            };
-
-            match channel_msg {
-                russh::ChannelMsg::Data { data } => {
+        // Read and print incoming stream events synchronously in the command execution thread
+        while let Some(event) = rx.recv().await {
+            match event {
+                ch_transport::client::ChannelEvent::Data(data) => {
                     let s = std::str::from_utf8(&data)
                         .map(|v| v.to_string())
                         .unwrap_or_default();
@@ -146,12 +143,22 @@ impl ClientCommand for InfoClientCommand {
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
-                russh::ChannelMsg::Eof => {
+                ch_transport::client::ChannelEvent::ExtendedData(data, _) => {
+                    let s = std::str::from_utf8(&data)
+                        .map(|v| v.to_string())
+                        .unwrap_or_default();
+                    eprint!("{}", s);
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                }
+                ch_transport::client::ChannelEvent::Eof | ch_transport::client::ChannelEvent::Close => {
                     break;
                 }
-                _ => {}
             }
         }
+
+        // Clean up our registered sink
+        ch_transport::client::unregister_sink(channel.id());
 
         Ok(())
     }
