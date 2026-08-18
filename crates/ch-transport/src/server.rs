@@ -5,11 +5,9 @@ use async_trait::async_trait;
 use ch_common::Result;
 use ch_spa::{Knock, NonceCache};
 use ed25519_dalek::{Signature, VerifyingKey};
-use russh::ChannelId;
-use russh::server::Session;
+use russh::ChannelMsg;
 use russh_keys::PublicKeyBase64;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -46,10 +44,8 @@ pub trait CommandExecutor: Send + Sync + 'static {
 pub async fn serve(port: u16, key: &VerifyingKey, executor: Arc<dyn CommandExecutor>) -> Result<()> {
     tracing::info!("Starting persistent SPA-gated listener on port {}", port);
     let nonce_cache = NonceCache::default();
-    
-    tokio::try_join!(
-        accept_tcp(key.clone(), nonce_cache, port, executor)
-    )?;
+
+    tokio::try_join!(accept_tcp(key.clone(), nonce_cache, port, executor))?;
 
     Ok(())
 }
@@ -62,7 +58,7 @@ async fn accept_tcp(
 ) -> Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("Listening on TCP port {} for knocks", port);
-    
+
     loop {
         let (mut stream, src) = listener.accept().await?;
         let key_clone = key.clone();
@@ -82,17 +78,23 @@ async fn accept_tcp(
 
                 if let Ok(signature) = Signature::try_from(&sig_bytes[..]) {
                     let verdict = ch_spa::validate(
-                        &knock, 
-                        &signature, 
-                        &key_clone, 
+                        &knock,
+                        &signature,
+                        &key_clone,
                         &cache_clone,
-                        current_timestamp()
-                    ).await;
+                        current_timestamp(),
+                    )
+                    .await;
 
                     match verdict {
                         ch_spa::Verdict::Open => {
-                            tracing::info!("Valid TCP knock from {}, transitioning to SSH session", src);
-                            if let Err(e) = handle_ssh_session(stream, key_clone, executor_clone).await {
+                            tracing::info!(
+                                "Valid TCP knock from {}, transitioning to SSH session",
+                                src
+                            );
+                            if let Err(e) =
+                                handle_ssh_session(stream, key_clone, executor_clone).await
+                            {
                                 tracing::error!("SSH session error for {}: {:?}", src, e);
                             }
                         }
@@ -110,14 +112,10 @@ async fn accept_tcp(
     }
 }
 
-/// Handler representing active agent SSH sessions.
+/// Handler for active agent SSH sessions.
+/// Auth is verified here; all channel logic is driven by `drive_channel`.
 struct AgentServerHandler {
     team_public_key: VerifyingKey,
-    channels: Arc<Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<Vec<u8>>>>>,
-    terminal_size: Arc<Mutex<HashMap<russh::ChannelId, (u32, u32)>>>,
-    #[cfg(unix)]
-    pty_masters: Arc<Mutex<HashMap<russh::ChannelId, RawFd>>>,
-    terminal_types: Arc<Mutex<HashMap<russh::ChannelId, String>>>, 
     executor: Arc<dyn CommandExecutor>,
 }
 
@@ -131,7 +129,9 @@ impl russh::server::Handler for AgentServerHandler {
         public_key: &russh_keys::key::PublicKey,
     ) -> std::result::Result<russh::server::Auth, Self::Error> {
         if user != "root" {
-            return Ok(russh::server::Auth::Reject { proceed_with_methods: None });
+            return Ok(russh::server::Auth::Reject {
+                proceed_with_methods: None,
+            });
         }
 
         let raw_bytes = public_key.public_key_bytes();
@@ -140,292 +140,312 @@ impl russh::server::Handler for AgentServerHandler {
         if raw_bytes.ends_with(&expected_bytes) {
             Ok(russh::server::Auth::Accept)
         } else {
-            Ok(russh::server::Auth::Reject { proceed_with_methods: None })
+            Ok(russh::server::Auth::Reject {
+                proceed_with_methods: None,
+            })
         }
     }
 
     async fn channel_open_session(
         &mut self,
-        _channel: russh::Channel<russh::server::Msg>,
-        _session: &mut russh::server::Session,
-    ) -> std::result::Result<bool, Self::Error> {
-        Ok(true)
-    }
-
-    async fn pty_request(
-        &mut self,
-        channel: russh::ChannelId,
-        term: &str,
-        col_width: u32,
-        row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _modes: &[(russh::Pty, u32)],
-        _session: &mut russh::server::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        self.terminal_size.lock().unwrap().insert(channel, (col_width, row_height));
-        self.terminal_types.lock().unwrap().insert(channel, term.to_string());
-        Ok(())
-    }
-
-    async fn window_change_request(
-        &mut self,
-        channel: russh::ChannelId,
-        col_width: u32,
-        row_height: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        _session: &mut russh::server::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        self.terminal_size.lock().unwrap().insert(channel, (col_width, row_height));
-        #[cfg(unix)]
-        {
-            if let Some(&master_fd) = self.pty_masters.lock().unwrap().get(&channel) {
-                set_winsize(master_fd, col_width, row_height);
-            }
-        }
-        Ok(())
-    }
-
-    async fn data(
-        &mut self,
-        channel: russh::ChannelId,
-        data: &[u8],
-        _session: &mut russh::server::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        if let Some(tx) = self.channels.lock().unwrap().get(&channel) {
-            let _ = tx.send(data.to_vec());
-        }
-        Ok(())
-    }
-
-    async fn shell_request(
-        &mut self,
-        channel: russh::ChannelId,
+        channel: russh::Channel<russh::server::Msg>,
         session: &mut russh::server::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        #[cfg(unix)]
-        {
-            use nix::pty::openpty;
-            use std::os::fd::IntoRawFd;
-            use std::os::unix::io::FromRawFd;
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-            let shell_path = if std::path::Path::new("/bin/bash").exists() {
-                "/bin/bash"
-            } else {
-                "/bin/sh"
-            };
-
-            // Allocate master/slave PTY pair
-            let pty = openpty(None, None)?;
-            let master_fd = pty.master.into_raw_fd();
-            let slave_fd = pty.slave.into_raw_fd();
-
-            // Set initial terminal size if requested by the client
-            if let Some(&(cols, rows)) = self.terminal_size.lock().unwrap().get(&channel) {
-                set_winsize(master_fd, cols, rows);
-            }
-
-            // Keep track of master_fd for future window resizing requests
-            self.pty_masters.lock().unwrap().insert(channel, master_fd);
-
-            let term = self.terminal_types.lock().unwrap()
-                .get(&channel)
-                .cloned()
-                .unwrap_or_else(|| "xterm".to_string());
-
-            let mut cmd = tokio::process::Command::new(shell_path);
-            cmd.env("TERM", term); 
-
-            // Execute low-level PTY linkage before spawning child
-            unsafe {
-                cmd.pre_exec(move || {
-                    let _ = nix::unistd::setsid();
-
-                    #[cfg(target_os = "linux")]
-                    {
-                        libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
-                    }
-
-                    nix::unistd::dup2(slave_fd, 0)?;
-                    nix::unistd::dup2(slave_fd, 1)?;
-                    nix::unistd::dup2(slave_fd, 2)?;
-
-                    let _ = nix::unistd::close(master_fd);
-                    let _ = nix::unistd::close(slave_fd);
-
-                    Ok(())
-                });
-            }
-
-            let mut child = cmd.spawn()?;
-            let _ = nix::unistd::close(slave_fd);
-
-            let master_file = unsafe { std::fs::File::from_raw_fd(master_fd) };
-            let mut async_master = tokio::fs::File::from_std(master_file);
-
-            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            self.channels.lock().unwrap().insert(channel, tx);
-
-            // Pipe SSH channel data to PTY stdin
-            let mut master_write = async_master.try_clone().await?;
-            tokio::spawn(async move {
-                while let Some(data) = rx.recv().await {
-                    if master_write.write_all(&data).await.is_err() {
-                        break;
-                    }
-                    let _ = master_write.flush().await;
-                }
-            });
-
-            // Pipe PTY stdout/stderr back to SSH channel
-            let handle = session.handle();
-            let pty_masters_clone = self.pty_masters.clone();
-            tokio::spawn(async move {
-                let mut buf = [0u8; 4096];
-                loop {
-                    match async_master.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            let _ = handle.data(channel, russh::CryptoVec::from_slice(&buf[..n])).await;
-                        }
-                    }
-                }
-                let _ = handle.close(channel).await;
-                let _ = child.kill().await;
-                pty_masters_clone.lock().unwrap().remove(&channel);
-            });
-
-            Ok(())
-        }
-
-        #[cfg(not(unix))]
-        {
-            // Non-Unix compilation fallback (uses raw pipes)
-            tracing::warn!("Allocating standard piped shell fallback on non-Unix platform");
-            let mut cmd = tokio::process::Command::new("cmd.exe");
-            cmd.stdin(std::process::Stdio::piped())
-               .stdout(std::process::Stdio::piped())
-               .stderr(std::process::Stdio::piped());
-
-            let mut child = cmd.spawn()?;
-            let mut stdin = child.stdin.take().expect("Failed to open stdin");
-            let mut stdout = child.stdout.take().expect("Failed to open stdout");
-            let mut stderr = child.stderr.take().expect("Failed to open stderr");
-
-            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
-            self.channels.lock().unwrap().insert(channel, tx);
-
-            tokio::spawn(async move {
-                while let Some(data) = rx.recv().await {
-                    if stdin.write_all(&data).await.is_err() {
-                        break;
-                    }
-                    let _ = stdin.flush().await;
-                }
-            });
-
-            let handle = session.handle();
-            tokio::spawn(async move {
-                let mut stdout_buf = [0u8; 1024];
-                let mut stderr_buf = [0u8; 1024];
-                loop {
-                    tokio::select! {
-                        res = stdout.read(&mut stdout_buf) => {
-                            match res {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => {
-                                    let _ = handle.data(channel, russh::CryptoVec::from_slice(&stdout_buf[..n])).await;
-                                }
-                            }
-                        }
-                        res = stderr.read(&mut stderr_buf) => {
-                            match res {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => {
-                                    let _ = handle.extended_data(channel, 1, russh::CryptoVec::from_slice(&stderr_buf[..n])).await;
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = handle.close(channel).await;
-            });
-
-            Ok(())
-        }
-    }
-
-    async fn exec_request(
-        &mut self,
-        channel: ChannelId,
-        data: &[u8],
-        session: &mut Session,
-    ) -> std::result::Result<(), Self::Error> {
-
-        let Ok(valid_str) = std::str::from_utf8(data) else {
-            session.channel_failure(channel); 
-             let original_error = std::str::from_utf8(data).unwrap_err();
-            return Err(russh::Error::Utf8(original_error).into()); 
-        };
-        
-        let parts: Vec<String> = valid_str
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-
-        if parts.is_empty() {
-            session.channel_failure(channel);
-            return Ok(());
-        }
-
-        let command = parts[0].clone();
-        let args = parts[1..].to_vec();
-
-        session.channel_success(channel);
-
-        let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-
-        let handle_stdout = session.handle();
-        let handle_stderr = session.handle();
-
-        // Spawn stdout forwarder task and track its JoinHandle
-        let stdout_forwarder = tokio::spawn(async move {
-            while let Some(chunk) = stdout_rx.recv().await {
-                let _ = handle_stdout.data(channel, russh::CryptoVec::from_slice(&chunk)).await;
-            }
-        });
-
-        // Spawn stderr forwarder task and track its JoinHandle
-        let stderr_forwarder = tokio::spawn(async move {
-            while let Some(chunk) = stderr_rx.recv().await {
-                let _ = handle_stderr.extended_data(channel, 1, russh::CryptoVec::from_slice(&chunk)).await;
-            }
-        });
-
-        let stdout = Box::new(ChannelTx { tx: stdout_tx });
-        let stderr = Box::new(ChannelTx { tx: stderr_tx });
+    ) -> std::result::Result<bool, Self::Error> {
         let executor = self.executor.clone();
-        let handle_close = session.handle();
-
+        let handle = session.handle();
         tokio::spawn(async move {
-            let res = executor.execute(command, args, stdout, stderr).await;
-            if let Err(e) = res {
-                tracing::error!("Command execution failed: {}", e);
+            if let Err(e) = drive_channel(channel, handle, executor).await {
+                tracing::error!("Channel session error: {:?}", e);
             }
-            // Wait for both background forwarder tasks to finish sending all data before closing
-            let _ = stdout_forwarder.await;
-            let _ = stderr_forwarder.await;
-            let _ = handle_close.close(channel).await;
         });
-
-        Ok(())
+        Ok(true)
     }
 }
 
-/// Dynamic SSH wrapper stream to write to russh session.
+/// Drives a single SSH channel through its full lifecycle.
+///
+/// Negotiates pty/shell/exec via `Channel::wait()` so no handler callbacks are needed.
+/// PTY terminal size, type, and all client requests arrive as `ChannelMsg` variants.
+async fn drive_channel(
+    mut channel: russh::Channel<russh::server::Msg>,
+    handle: russh::server::Handle,
+    executor: Arc<dyn CommandExecutor>,
+) -> anyhow::Result<()> {
+    let mut term = "xterm".to_string();
+    let mut cols = 80u32;
+    let mut rows = 24u32;
+
+    loop {
+        match channel.wait().await {
+            None => return Ok(()),
+
+            Some(ChannelMsg::RequestPty {
+                want_reply,
+                term: t,
+                col_width,
+                row_height,
+                ..
+            }) => {
+                term = t;
+                cols = col_width;
+                rows = row_height;
+                if want_reply {
+                    let _ = handle.channel_success(channel.id()).await;
+                }
+            }
+
+            Some(ChannelMsg::RequestShell { want_reply }) => {
+                if want_reply {
+                    let _ = handle.channel_success(channel.id()).await;
+                }
+                return run_shell(channel, handle, term, cols, rows).await;
+            }
+
+            Some(ChannelMsg::Exec { command, want_reply }) => {
+                let Ok(cmd_str) = std::str::from_utf8(&command) else {
+                    if want_reply {
+                        let _ = handle.channel_failure(channel.id()).await;
+                    }
+                    return Ok(());
+                };
+
+                let parts: Vec<String> = cmd_str
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                if parts.is_empty() {
+                    if want_reply {
+                        let _ = handle.channel_failure(channel.id()).await;
+                    }
+                    return Ok(());
+                }
+
+                if want_reply {
+                    let _ = handle.channel_success(channel.id()).await;
+                }
+                return run_exec(channel, handle, executor, parts).await;
+            }
+
+            Some(ChannelMsg::Close) => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+/// Spawns a PTY-backed shell and bridges it to the SSH channel.
+///
+/// Reads client data and window-change events via `channel.wait()`.
+/// Writes PTY output back via `handle.data()` from a separate task.
+async fn run_shell(
+    mut channel: russh::Channel<russh::server::Msg>,
+    handle: russh::server::Handle,
+    term: String,
+    cols: u32,
+    rows: u32,
+) -> anyhow::Result<()> {
+    let channel_id = channel.id();
+
+    #[cfg(unix)]
+    {
+        use nix::pty::openpty;
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::io::FromRawFd;
+
+        let shell_path = if std::path::Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        };
+
+        let pty = openpty(None, None)?;
+        let master_fd = pty.master.into_raw_fd();
+        let slave_fd = pty.slave.into_raw_fd();
+
+        set_winsize(master_fd, cols, rows);
+
+        let mut cmd = tokio::process::Command::new(shell_path);
+        cmd.env("TERM", &term);
+
+        unsafe {
+            cmd.pre_exec(move || {
+                let _ = nix::unistd::setsid();
+                #[cfg(target_os = "linux")]
+                {
+                    libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+                }
+                nix::unistd::dup2(slave_fd, 0)?;
+                nix::unistd::dup2(slave_fd, 1)?;
+                nix::unistd::dup2(slave_fd, 2)?;
+                let _ = nix::unistd::close(master_fd);
+                let _ = nix::unistd::close(slave_fd);
+                Ok(())
+            });
+        }
+
+        let mut child = cmd.spawn()?;
+        let _ = nix::unistd::close(slave_fd);
+
+        let master_file = unsafe { std::fs::File::from_raw_fd(master_fd) };
+        let async_master = tokio::fs::File::from_std(master_file);
+        let mut async_master_read = async_master.try_clone().await?;
+        let mut async_master_write = async_master;
+
+        // PTY output → SSH channel (independent task; uses handle, not channel)
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                match async_master_read.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if handle
+                            .data(channel_id, russh::CryptoVec::from_slice(&buf[..n]))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = handle.close(channel_id).await;
+            let _ = child.kill().await;
+        });
+
+        // SSH channel → PTY input + window resize (driven by channel.wait())
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { ref data }) => {
+                    if async_master_write.write_all(data).await.is_err() {
+                        break;
+                    }
+                    let _ = async_master_write.flush().await;
+                }
+                Some(ChannelMsg::WindowChange {
+                    col_width,
+                    row_height,
+                    ..
+                }) => {
+                    set_winsize(master_fd, col_width, row_height);
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tracing::warn!("Allocating standard piped shell fallback on non-Unix platform");
+
+        let mut cmd = tokio::process::Command::new("cmd.exe");
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn()?;
+        let mut stdin = child.stdin.take().expect("Failed to open stdin");
+        let mut stdout = child.stdout.take().expect("Failed to open stdout");
+        let mut stderr = child.stderr.take().expect("Failed to open stderr");
+
+        // Process stdout/stderr → SSH channel
+        tokio::spawn(async move {
+            let mut stdout_buf = [0u8; 1024];
+            let mut stderr_buf = [0u8; 1024];
+            loop {
+                tokio::select! {
+                    res = stdout.read(&mut stdout_buf) => match res {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if handle.data(channel_id, russh::CryptoVec::from_slice(&stdout_buf[..n])).await.is_err() {
+                                break;
+                            }
+                        }
+                    },
+                    res = stderr.read(&mut stderr_buf) => match res {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if handle.extended_data(channel_id, 1, russh::CryptoVec::from_slice(&stderr_buf[..n])).await.is_err() {
+                                break;
+                            }
+                        }
+                    },
+                }
+            }
+            let _ = handle.close(channel_id).await;
+        });
+
+        // SSH channel → process stdin
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { ref data }) => {
+                    if stdin.write_all(data).await.is_err() {
+                        break;
+                    }
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Runs an exec command, forwarding stdout/stderr back to the SSH channel.
+///
+/// The executor has no stdin, so `channel` is kept alive in the spawned task
+/// and dropped cleanly after `handle.close()`.
+async fn run_exec(
+    channel: russh::Channel<russh::server::Msg>,
+    handle: russh::server::Handle,
+    executor: Arc<dyn CommandExecutor>,
+    parts: Vec<String>,
+) -> anyhow::Result<()> {
+    let channel_id = channel.id();
+    let command = parts[0].clone();
+    let args = parts[1..].to_vec();
+
+    let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    let handle_stdout = handle.clone();
+    let handle_stderr = handle.clone();
+
+    let stdout_forwarder = tokio::spawn(async move {
+        while let Some(chunk) = stdout_rx.recv().await {
+            let _ = handle_stdout
+                .data(channel_id, russh::CryptoVec::from_slice(&chunk))
+                .await;
+        }
+    });
+
+    let stderr_forwarder = tokio::spawn(async move {
+        while let Some(chunk) = stderr_rx.recv().await {
+            let _ = handle_stderr
+                .extended_data(channel_id, 1, russh::CryptoVec::from_slice(&chunk))
+                .await;
+        }
+    });
+
+    let stdout = Box::new(ChannelTx { tx: stdout_tx });
+    let stderr = Box::new(ChannelTx { tx: stderr_tx });
+
+    tokio::spawn(async move {
+        let res = executor.execute(command, args, stdout, stderr).await;
+        if let Err(e) = res {
+            tracing::error!("Command execution failed: {}", e);
+        }
+        let _ = stdout_forwarder.await;
+        let _ = stderr_forwarder.await;
+        let _ = handle.close(channel_id).await;
+        drop(channel); // keep alive until close is confirmed
+    });
+
+    Ok(())
+}
+
+/// Async-write wrapper that forwards bytes into an unbounded mpsc sender.
 #[derive(Clone)]
 struct ChannelTx {
     tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -462,15 +482,14 @@ impl tokio::io::AsyncWrite for ChannelTx {
 }
 
 async fn handle_ssh_session(
-    stream: TcpStream, 
+    stream: TcpStream,
     team_public_key: VerifyingKey,
     executor: Arc<dyn CommandExecutor>,
 ) -> Result<()> {
     let mut config = russh::server::Config {
         ..Default::default()
     };
-    
-    // Generate a unique host key at runtime.
+
     let mut rng = rand::rngs::OsRng;
     let host_key = ed25519_dalek::SigningKey::generate(&mut rng);
     let key_pair = russh_keys::key::KeyPair::Ed25519(host_key);
@@ -478,11 +497,6 @@ async fn handle_ssh_session(
 
     let handler = AgentServerHandler {
         team_public_key,
-        channels: Arc::new(Mutex::new(HashMap::new())),
-        terminal_size: Arc::new(Mutex::new(HashMap::new())),
-        #[cfg(unix)]
-        pty_masters: Arc::new(Mutex::new(HashMap::new())),
-        terminal_types: Arc::new(Mutex::new(HashMap::new())),
         executor,
     };
 

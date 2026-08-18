@@ -120,13 +120,9 @@ impl ClientCommand for InfoClientCommand {
 
     async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
         let session = ctx.session;
-        let channel = session.channel_open_session()
+        let mut channel = session.channel_open_session()
             .await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
-
-        // Allocate a thread-safe message sink for our channel
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        ch_transport::client::register_sink(channel.id(), tx);
 
         let server_command = InfoAgentCommand::new();
 
@@ -139,33 +135,30 @@ impl ClientCommand for InfoClientCommand {
         channel.exec(true, exec_payload.as_bytes()).await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
-        // Read and print incoming stream events synchronously in the command execution thread
-        while let Some(event) = rx.recv().await {
-            match event {
-                ch_transport::client::ChannelEvent::Data(data) => {
-                    let s = std::str::from_utf8(&data)
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { ref data } => {
+                    let s = std::str::from_utf8(data).unwrap_or_default();
                     print!("{}", s);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
-                ch_transport::client::ChannelEvent::ExtendedData(data, _) => {
-                    let s = std::str::from_utf8(&data)
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+                russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                    let s = std::str::from_utf8(data).unwrap_or_default();
                     eprint!("{}", s);
                     use std::io::Write;
                     let _ = std::io::stderr().flush();
                 }
-                ch_transport::client::ChannelEvent::Eof | ch_transport::client::ChannelEvent::Close => {
-                    break;
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    if exit_status != 0 {
+                        tracing::warn!("Remote command exited with status {}", exit_status);
+                    }
+                    // don't break here — Eof/Close will follow
                 }
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                _ => {}
             }
         }
-
-        // Clean up our registered sink
-        ch_transport::client::unregister_sink(channel.id());
 
         Ok(())
     }

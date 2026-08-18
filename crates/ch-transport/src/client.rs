@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use ch_common::Result;
 use ch_spa::Knock;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use russh::ChannelMsg;
 use russh::client::Handle;
 use russh_keys::PublicKeyBase64;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -62,33 +62,8 @@ pub struct OperatorKeyPair {
     pub secret: SigningKey,
 }
 
-/// Multiplexed channel event routing
-#[derive(Debug, Clone)]
-pub enum ChannelEvent {
-    Data(Vec<u8>),
-    ExtendedData(Vec<u8>, u32),
-    Eof,
-    Close,
-}
-
-type SinksMap = Mutex<HashMap<russh::ChannelId, mpsc::UnboundedSender<ChannelEvent>>>;
-
-fn channel_sinks() -> &'static SinksMap {
-    static SINKS: OnceLock<SinksMap> = OnceLock::new();
-    SINKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Registers an active foreground receiver for a specific SSH channel
-pub fn register_sink(id: russh::ChannelId, tx: mpsc::UnboundedSender<ChannelEvent>) {
-    channel_sinks().lock().unwrap().insert(id, tx);
-}
-
-/// Unregisters a foreground receiver when a command completes
-pub fn unregister_sink(id: russh::ChannelId) {
-    channel_sinks().lock().unwrap().remove(&id);
-}
-
 /// Handler for the russh client session.
+/// Only validates the server's host key; all channel I/O is handled via `Channel::wait()`.
 #[derive(Clone)]
 pub struct ClientHandler {
     expected_key: VerifyingKey,
@@ -112,75 +87,6 @@ impl russh::client::Handler for ClientHandler {
             tracing::warn!("Unpinned server host key received");
             Ok(true)
         }
-    }
-
-    async fn data(
-        &mut self,
-        channel: russh::ChannelId,
-        data: &[u8],
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        // Scoped block to ensure the MutexGuard is dropped before the await point
-        let sender = {
-            let sinks = channel_sinks().lock().unwrap();
-            sinks.get(&channel).cloned()
-        };
-
-        if let Some(tx) = sender {
-            let _ = tx.send(ChannelEvent::Data(data.to_vec()));
-        } else {
-            let mut stdout = tokio::io::stdout();
-            stdout.write_all(data).await?;
-            stdout.flush().await?;
-        }
-        Ok(())
-    }
-
-    async fn extended_data(
-        &mut self,
-        channel: russh::ChannelId,
-        ext: u32,
-        data: &[u8],
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        // Scoped block to ensure the MutexGuard is dropped before the await point
-        let sender = {
-            let sinks = channel_sinks().lock().unwrap();
-            sinks.get(&channel).cloned()
-        };
-
-        if let Some(tx) = sender {
-            let _ = tx.send(ChannelEvent::ExtendedData(data.to_vec(), ext));
-        } else {
-            let mut stderr = tokio::io::stderr();
-            stderr.write_all(data).await?;
-            stderr.flush().await?;
-        }
-        Ok(())
-    }
-
-    async fn channel_eof(
-        &mut self,
-        channel: russh::ChannelId,
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        let sinks = channel_sinks().lock().unwrap();
-        if let Some(tx) = sinks.get(&channel) {
-            let _ = tx.send(ChannelEvent::Eof);
-        }
-        Ok(())
-    }
-
-    async fn channel_close(
-        &mut self,
-        channel: russh::ChannelId,
-        _session: &mut russh::client::Session,
-    ) -> std::result::Result<(), Self::Error> {
-        let sinks = channel_sinks().lock().unwrap();
-        if let Some(tx) = sinks.get(&channel) {
-            let _ = tx.send(ChannelEvent::Close);
-        }
-        Ok(())
     }
 }
 
@@ -225,45 +131,19 @@ fn key_event_to_bytes(key: crossterm::event::KeyEvent) -> Option<Vec<u8>> {
             let mut buf = [0; 4];
             bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         }
-        crossterm::event::KeyCode::Enter => {
-            bytes.push(b'\r');
-        }
-        crossterm::event::KeyCode::Tab => {
-            bytes.push(b'\t');
-        }
-        crossterm::event::KeyCode::Backspace => {
-            bytes.push(127);
-        }
-        crossterm::event::KeyCode::Esc => {
-            bytes.push(27);
-        }
-        crossterm::event::KeyCode::Up => {
-            bytes.extend_from_slice(b"\x1b[A");
-        }
-        crossterm::event::KeyCode::Down => {
-            bytes.extend_from_slice(b"\x1b[B");
-        }
-        crossterm::event::KeyCode::Right => {
-            bytes.extend_from_slice(b"\x1b[C");
-        }
-        crossterm::event::KeyCode::Left => {
-            bytes.extend_from_slice(b"\x1b[D");
-        }
-        crossterm::event::KeyCode::Home => {
-            bytes.extend_from_slice(b"\x1b[H");
-        }
-        crossterm::event::KeyCode::End => {
-            bytes.extend_from_slice(b"\x1b[F");
-        }
-        crossterm::event::KeyCode::PageUp => {
-            bytes.extend_from_slice(b"\x1b[5~");
-        }
-        crossterm::event::KeyCode::PageDown => {
-            bytes.extend_from_slice(b"\x1b[6~");
-        }
-        crossterm::event::KeyCode::Delete => {
-            bytes.extend_from_slice(b"\x1b[3~");
-        }
+        crossterm::event::KeyCode::Enter => bytes.push(b'\r'),
+        crossterm::event::KeyCode::Tab => bytes.push(b'\t'),
+        crossterm::event::KeyCode::Backspace => bytes.push(127),
+        crossterm::event::KeyCode::Esc => bytes.push(27),
+        crossterm::event::KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
+        crossterm::event::KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
+        crossterm::event::KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
+        crossterm::event::KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
+        crossterm::event::KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
+        crossterm::event::KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
+        crossterm::event::KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+        crossterm::event::KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+        crossterm::event::KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
         _ => return None,
     }
 
@@ -284,10 +164,7 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
 
     tracing::info!("Connection established, transitioning stream to russh");
 
-    let config = russh::client::Config {
-        ..Default::default()
-    };
-    let config = Arc::new(config);
+    let config = Arc::new(russh::client::Config::default());
 
     let handler = ClientHandler {
         expected_key: keypair.public,
@@ -325,7 +202,7 @@ async fn run_operator_repl(
     executor: Arc<dyn ClientCommandExecutor>,
 ) -> anyhow::Result<()> {
     let mut rl = DefaultEditor::new()?;
-    
+
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
     loop {
@@ -336,7 +213,7 @@ async fn run_operator_repl(
                 if input.is_empty() {
                     continue;
                 }
-                
+
                 let _ = rl.add_history_entry(input);
 
                 let parts: Vec<String> = input
@@ -392,10 +269,13 @@ async fn run_operator_repl(
     Ok(())
 }
 
-async fn run_interactive_shell(
-    session: &mut Handle<ClientHandler>,
-) -> anyhow::Result<()> {
-    let channel = session
+/// Runs an interactive PTY shell over SSH.
+///
+/// Reads from the channel directly via `channel.wait()` — no global sink or
+/// handler callbacks involved. Each `ChannelMsg::Data` is written to stdout;
+/// `Eof`/`Close`/`None` terminates the loop.
+async fn run_interactive_shell(session: &mut Handle<ClientHandler>) -> anyhow::Result<()> {
+    let mut channel = session
         .channel_open_session()
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -414,10 +294,6 @@ async fn run_interactive_shell(
 
     tracing::info!("Interactive PTY shell allocated");
 
-    // Register a local multiplex sink for the interactive shell channel
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    register_sink(channel.id(), tx);
-
     let _raw_mode_guard = RawModeGuard::new();
 
     #[cfg(unix)]
@@ -431,41 +307,32 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                event = rx.recv() => {
-                    let Some(channel_event) = event else {
-                        break;
-                    };
-                    match channel_event {
-                        ChannelEvent::Data(data) => {
+                msg = channel.wait() => {
+                    match msg {
+                        Some(ChannelMsg::Data { ref data }) => {
                             let mut stdout = tokio::io::stdout();
-                            if stdout.write_all(&data).await.is_err() {
-                                break;
-                            }
+                            if stdout.write_all(data).await.is_err() { break; }
                             let _ = stdout.flush().await;
                         }
-                        ChannelEvent::ExtendedData(data, _) => {
+                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                             let mut stderr = tokio::io::stderr();
-                            if stderr.write_all(&data).await.is_err() {
-                                break;
-                            }
+                            if stderr.write_all(data).await.is_err() { break; }
                             let _ = stderr.flush().await;
                         }
-                        ChannelEvent::Eof | ChannelEvent::Close => {
-                            break;
-                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        _ => {}
                     }
                 }
+
                 Some(_) = async {
-                    if let Some(ref mut sig) = sigwinch {
-                        sig.recv().await
-                    } else {
-                        std::future::pending().await
-                    }
+                    if let Some(ref mut sig) = sigwinch { sig.recv().await }
+                    else { std::future::pending().await }
                 } => {
                     if let Ok((c, r)) = crossterm::terminal::size() {
                         let _ = channel.window_change(c as u32, r as u32, 0, 0).await;
                     }
                 }
+
                 readable = async_tty.readable() => {
                     let mut guard = match readable {
                         Ok(g) => g,
@@ -492,9 +359,7 @@ async fn run_interactive_shell(
                                 hex = %buf[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                                 "stdin -> ssh"
                             );
-                            if channel.data(&buf[..n]).await.is_err() {
-                                break;
-                            }
+                            if channel.data(&buf[..n]).await.is_err() { break; }
                         }
                         Ok(Err(_)) => break,
                         Err(_would_block) => continue,
@@ -506,7 +371,7 @@ async fn run_interactive_shell(
 
     #[cfg(not(unix))]
     {
-        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(1024);
         std::thread::spawn(move || {
             loop {
                 match crossterm::event::read() {
@@ -525,30 +390,23 @@ async fn run_interactive_shell(
 
         loop {
             tokio::select! {
-                event = rx.recv() => {
-                    let Some(channel_event) = event else {
-                        break;
-                    };
-                    match channel_event {
-                        ChannelEvent::Data(data) => {
+                msg = channel.wait() => {
+                    match msg {
+                        Some(ChannelMsg::Data { ref data }) => {
                             let mut stdout = tokio::io::stdout();
-                            if stdout.write_all(&data).await.is_err() {
-                                break;
-                            }
+                            if stdout.write_all(data).await.is_err() { break; }
                             let _ = stdout.flush().await;
                         }
-                        ChannelEvent::ExtendedData(data, _) => {
+                        Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                             let mut stderr = tokio::io::stderr();
-                            if stderr.write_all(&data).await.is_err() {
-                                break;
-                            }
+                            if stderr.write_all(data).await.is_err() { break; }
                             let _ = stderr.flush().await;
                         }
-                        ChannelEvent::Eof | ChannelEvent::Close => {
-                            break;
-                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                        _ => {}
                     }
                 }
+
                 res = stdin_rx.recv() => {
                     match res {
                         None => break,
@@ -557,9 +415,7 @@ async fn run_interactive_shell(
                                 hex = %data.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "),
                                 "stdin -> ssh"
                             );
-                            if channel.data(&data[..]).await.is_err() {
-                                break;
-                            }
+                            if channel.data(&data[..]).await.is_err() { break; }
                         }
                     }
                 }
@@ -567,17 +423,13 @@ async fn run_interactive_shell(
         }
     }
 
-    unregister_sink(channel.id());
     Ok(())
 }
 
 async fn connect_direct(target: &Target, keypair: &OperatorKeyPair) -> Result<TcpStream> {
     tracing::info!("Direct connection to {}:{}", target.host, target.port);
-
     let mut stream = TcpStream::connect(format!("{}:{}", target.host, target.port)).await?;
-
     send_knock_direct(&mut stream, keypair, target.port).await?;
-
     Ok(stream)
 }
 
@@ -616,7 +468,7 @@ async fn connect_via_proxy_chain(
             }
             Hop::Teleport { proxy } => {
                 tracing::info!("Teleport proxy: {}", proxy);
-                stream = spawn_teleport_proxy(&proxy, target, keypair).await?;
+                stream = spawn_teleport_proxy(proxy, target, keypair).await?;
                 send_knock_direct(&mut stream, keypair, target.port).await?;
             }
         }
@@ -625,7 +477,11 @@ async fn connect_via_proxy_chain(
     Ok(stream)
 }
 
-async fn send_knock_direct(stream: &mut TcpStream, keypair: &OperatorKeyPair, service_port: u16) -> Result<()> {
+async fn send_knock_direct(
+    stream: &mut TcpStream,
+    keypair: &OperatorKeyPair,
+    service_port: u16,
+) -> Result<()> {
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
@@ -641,7 +497,6 @@ async fn send_knock_direct(stream: &mut TcpStream, keypair: &OperatorKeyPair, se
     };
 
     let sig = keypair.secret.sign(&knock.signed_bytes());
-
     let message = [knock.signed_bytes().as_slice(), sig.to_bytes().as_slice()].concat();
     stream.write_all(&message).await?;
 
@@ -673,8 +528,9 @@ async fn spawn_proxy_command(argv: &[String]) -> Result<TcpStream> {
     tokio::spawn(async move {
         let _ = tokio::io::copy_bidirectional(
             &mut server_stream,
-            &mut tokio::io::join(&mut child_stdout, &mut child_stdin)
-        ).await;
+            &mut tokio::io::join(&mut child_stdout, &mut child_stdin),
+        )
+        .await;
         let _ = child.wait().await;
     });
 
@@ -687,14 +543,20 @@ async fn spawn_teleport_proxy(
     _keypair: &OperatorKeyPair,
 ) -> Result<TcpStream> {
     let mut proxy_cmd = tokio::process::Command::new("tsh")
-        .args(&["proxy", "ssh", "-L", "0.0.0.0:0", &format!("{}:{}", target.host, target.port)])
+        .args(&[
+            "proxy",
+            "ssh",
+            "-L",
+            "0.0.0.0:0",
+            &format!("{}:{}", target.host, target.port),
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()?;
 
     let _ = proxy_cmd.wait().await;
 
-    let stream = TcpStream::connect(format!("127.0.0.1:22")).await?;
+    let stream = TcpStream::connect("127.0.0.1:22").await?;
     Ok(stream)
 }
 
@@ -728,14 +590,18 @@ fn parse_private_key(raw_bytes: &[u8]) -> Option<OperatorKeyPair> {
         let b64_body = lines[1..lines.len() - 1].join("");
 
         use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64_body).ok()?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64_body)
+            .ok()?;
 
         if decoded.len() > 100 {
             let mut i = 0;
             while i + 64 <= decoded.len() {
-                let potential_chunk = &decoded[i..i+64];
-                let secret_bytes: [u8; 32] = potential_chunk[..32].try_into().unwrap_or([0;32]);
-                let public_bytes: [u8; 32] = potential_chunk[32..].try_into().unwrap_or([0;32]);
+                let potential_chunk = &decoded[i..i + 64];
+                let secret_bytes: [u8; 32] =
+                    potential_chunk[..32].try_into().unwrap_or([0; 32]);
+                let public_bytes: [u8; 32] =
+                    potential_chunk[32..].try_into().unwrap_or([0; 32]);
                 let secret = SigningKey::from_bytes(&secret_bytes);
                 if let Ok(public) = VerifyingKey::from_bytes(&public_bytes) {
                     if secret.verifying_key() == public {
@@ -748,7 +614,7 @@ fn parse_private_key(raw_bytes: &[u8]) -> Option<OperatorKeyPair> {
     }
 
     None
-}   
+}
 
 fn generate_nonce() -> [u8; 16] {
     use rand::RngCore;
