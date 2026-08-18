@@ -19,7 +19,7 @@ impl AgentCommand for LockdownAgentCommand {
     fn name(&self) -> &'static str { "lockdown" }
 
     async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
-        ctx.stdout.write_all(report.as_bytes()).await?;
+//        ctx.stdout.write_all(report.as_bytes()).await?;
         Ok(())
     }
 }
