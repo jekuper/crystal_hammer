@@ -209,7 +209,6 @@ impl russh::server::Handler for AgentServerHandler {
             use nix::pty::openpty;
             use std::os::fd::IntoRawFd;
             use std::os::unix::io::FromRawFd;
-            use std::os::unix::process::CommandExt;
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             let shell_path = if std::path::Path::new("/bin/bash").exists() {
