@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
 
     // Registries are the extension seams; construct them up front.
     tracing::info!("Loading firewall backend...");
-    let _firewall = ch_firewall::Registry::with_builtins();
+//    let _firewall = ch_firewall::Registry::with_builtins();
     
     tracing::info!("Loading persistence mechanisms...");
     let _persistence = ch_persistence::Registry::with_builtins();

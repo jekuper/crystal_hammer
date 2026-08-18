@@ -3,7 +3,7 @@ use aya::{
     programs::{SchedClassifier, TcAttachType, tc},
     Ebpf,
 };
-use ch_firewall_common::BlockedIpKey;
+use aya::programs::tc::{NlOptions, TcAttachOptions};
 use std::net::Ipv4Addr;
 
 pub struct Firewall {
@@ -22,7 +22,14 @@ impl Firewall {
 
         let prog: &mut SchedClassifier = bpf.program_mut("ch_firewall").unwrap().try_into()?;
         prog.load()?;
-        prog.attach(iface, TcAttachType::Ingress)?;
+        prog.attach_with_options(
+            iface,
+            TcAttachType::Ingress,
+            TcAttachOptions::Netlink(NlOptions {
+                priority: 1, // low number = high priority = runs before other filters
+                ..Default::default()
+            }),
+        )?;
 
         Ok(Self { bpf, iface: iface.to_string() })
     }
@@ -42,9 +49,9 @@ impl Firewall {
     }
 
     pub fn block_ip(&mut self, addr: Ipv4Addr, prefix_len: u32) -> anyhow::Result<()> {
-        let mut map: LpmTrie<_, BlockedIpKey, u8> =
+        let mut map: LpmTrie<_, u32, u8> =
             LpmTrie::try_from(self.bpf.map_mut("BLOCKED_IPS").unwrap())?;
-        let key = Key::new(prefix_len, BlockedIpKey { prefix_len, addr_be: u32::from(addr).to_be() });
+        let key = Key::new(prefix_len, u32::from(addr));
         map.insert(&key, 1, 0)?;
         Ok(())
     }
