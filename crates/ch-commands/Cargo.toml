@@ -9,6 +9,7 @@ authors.workspace = true
 ch-common.workspace = true
 ch-transport.workspace = true
 ch-store.workspace = true
+ch-firewall.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

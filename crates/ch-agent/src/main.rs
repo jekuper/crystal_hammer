@@ -4,7 +4,10 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result};
+use ch_common::config::CH_PORT;
 use std::sync::Arc;
+
+
 
 struct AgentExecutor {
     registry: ch_commands::model::AgentCommandRegistry,
@@ -80,11 +83,15 @@ async fn main() -> Result<()> {
         store,
     });
 
-    tracing::info!("crystal-hammer agent M1: SPA-gated listener ready");
+    let firewall = Firewall::init_global()?;
+    let handle = firewall.clone().spawn_supervised();
     
     // Start the SPA-gated listener on configured port
-    let port = 2222;
+    let port = CH_PORT;
     ch_transport::serve(port, &key, executor).await?;
+
+    firewall.shutdown();
+    let _ = handle.await;
     
     Ok(())
 }

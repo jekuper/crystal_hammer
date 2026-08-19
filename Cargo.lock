@@ -418,6 +418,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "ch-common",
+ "ch-firewall",
  "ch-store",
  "ch-transport",
  "russh",

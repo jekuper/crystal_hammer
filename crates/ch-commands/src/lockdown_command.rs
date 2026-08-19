@@ -1,6 +1,9 @@
 use std::fs;
 use async_trait::async_trait;
 use ch_common::Result;
+use ch_common::config::CH_PORT;
+use ch_firewall::loader::Firewall;
+use ch_firewall::loader::Mode;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
@@ -20,6 +23,10 @@ impl AgentCommand for LockdownAgentCommand {
 
     async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
 //        ctx.stdout.write_all(report.as_bytes()).await?;
+        Firewall::global().set_mode(Mode::Lockdown).await?;
+        Firewall::global().allow_port(CH_PORT);
+
+        ctx.stdout.write_all("Lockdown enforced. Things are tough, aren't they? :)".as_bytes());
         Ok(())
     }
 }
