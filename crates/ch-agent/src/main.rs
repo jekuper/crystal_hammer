@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use ch_common::config::CH_PORT;
+use ch_firewall::loader::Firewall;
 use std::sync::Arc;
 
 

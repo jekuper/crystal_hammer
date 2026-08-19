@@ -1,4 +1,5 @@
 use std::fs;
+use anyhow::Error;
 use async_trait::async_trait;
 use ch_common::Result;
 use ch_common::config::CH_PORT;
@@ -22,11 +23,16 @@ impl AgentCommand for LockdownAgentCommand {
     fn name(&self) -> &'static str { "lockdown" }
 
     async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
-//        ctx.stdout.write_all(report.as_bytes()).await?;
-        Firewall::global().set_mode(Mode::Lockdown).await?;
-        Firewall::global().allow_port(CH_PORT);
+        Firewall::global()
+            .set_mode(Mode::Lockdown)
+            .await
+            .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
+        
+        Firewall::global().allow_port(CH_PORT)
+            .await
+            .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
 
-        ctx.stdout.write_all("Lockdown enforced. Things are tough, aren't they? :)".as_bytes());
+        ctx.stdout.write_all("Lockdown enforced. Things are tough, aren't they? :)".as_bytes()).await?;
         Ok(())
     }
 }

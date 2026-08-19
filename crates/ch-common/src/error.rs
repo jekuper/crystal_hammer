@@ -22,6 +22,9 @@ pub enum Error {
     Unsupported(String),
 
     #[error("{0}")]
+    AgentCommand(String),
+
+    #[error("{0}")]
     Other(String),
 }
 

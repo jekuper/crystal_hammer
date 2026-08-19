@@ -2,11 +2,11 @@
 
 use aya::{
     maps::{Array, HashMap as AyaHashMap},
-    programs::{links::LinkId, tc, SchedClassifier, TcAttachType},
+    programs::{tc, SchedClassifier, TcAttachType},
 };
-use aya::programs::tc::{NlOptions, TcAttachOptions};
+use aya::programs::tc::{NlOptions, TcAttachOptions, SchedClassifierLinkId};
 use aya::Ebpf;
-use futures::stream::TryStreamExt;
+use netlink_packet_core::{NetlinkMessage, NetlinkPayload};
 use netlink_packet_route::link::LinkAttribute;
 use rtnetlink::constants::RTMGRP_LINK;
 use rtnetlink::sys::{AsyncSocket, SocketAddr};
@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use std::sync::OnceLock;
+use futures::{StreamExt, TryStreamExt};
+use netlink_packet_route::link::LinkFlags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -25,12 +27,10 @@ pub enum Mode {
     Lockdown = 1,
 }
 
-const LOOPBACK_FLAG: u32 = libc::IFF_LOOPBACK as u32;
-
 /// Bookkeeping for one attached interface.
 struct AttachedIface {
     name: String,
-    link_id: LinkId,
+    link_id: SchedClassifierLinkId,
 }
 
 struct Inner {
@@ -120,28 +120,27 @@ impl Firewall {
     // --- mode / allow-list controls ---
 
     pub async fn set_mode(&self, mode: Mode) -> anyhow::Result<()> {
-        let inner = self.inner.lock().await;
-        set_mode_on(&inner.bpf, mode)
+        let mut inner = self.inner.lock().await;
+        set_mode_on(&mut inner.bpf, mode)
     }
 
     fn set_mode_sync(&self, mode: Mode) -> anyhow::Result<()> {
-        // used only during construction, before anything else can race us
-        let inner = self.inner.try_lock().expect("no concurrent access during load()");
-        set_mode_on(&inner.bpf, mode)
+        let mut inner = self.inner.try_lock().expect("no concurrent access during load()");
+        set_mode_on(&mut inner.bpf, mode)
     }
 
     pub async fn allow_port(&self, port: u16) -> anyhow::Result<()> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let mut map: AyaHashMap<_, u16, u8> =
-            AyaHashMap::try_from(inner.bpf.map("ALLOWED_PORTS").unwrap().try_clone()?)?;
+            AyaHashMap::try_from(inner.bpf.map_mut("ALLOWED_PORTS").unwrap())?;
         map.insert(port, 1, 0)?;
         Ok(())
     }
 
-    pub async fn deny_port(&self, port: u16) -> anyhow::Result<()> {
-        let inner = self.inner.lock().await;
+    pub async fn remove_allow_port(&self, port: u16) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
         let mut map: AyaHashMap<_, u16, u8> =
-            AyaHashMap::try_from(inner.bpf.map("ALLOWED_PORTS").unwrap().try_clone()?)?;
+            AyaHashMap::try_from(inner.bpf.map_mut("ALLOWED_PORTS").unwrap())?;
         map.remove(&port)?;
         Ok(())
     }
@@ -168,18 +167,16 @@ impl Firewall {
     /// Most callers want `spawn_supervised()` instead of calling this
     /// directly — it handles logging and background execution for you.
     pub async fn run(&self) -> Result<(), FirewallRunError> {
-        let (conn, handle, mut messages) = rtnetlink::new_connection()
+        let (mut conn, handle, mut messages) = rtnetlink::new_connection()
             .map_err(|e| FirewallRunError::Run(e.into()))?;
 
         // Join the RTMGRP_LINK multicast group so `messages` also yields
         // link add/remove/change notifications, not just our own requests.
-        {
-            let mut socket = conn.socket_ref().clone();
-            socket
-                .socket_mut()
-                .bind(&SocketAddr::new(0, RTMGRP_LINK))
-                .map_err(|e| FirewallRunError::Run(e.into()))?;
-        }
+        conn.socket_mut()
+            .socket_mut()
+            .bind(&SocketAddr::new(0, RTMGRP_LINK))
+            .map_err(|e| FirewallRunError::Run(e.into()))?;
+
         let conn_task = tokio::spawn(conn);
 
         let run_result = self.run_inner(&handle, &mut messages).await;
@@ -204,9 +201,9 @@ impl Firewall {
     async fn run_inner(
         &self,
         handle: &rtnetlink::Handle,
-        messages: &mut (impl futures::Stream
+        messages: &mut (impl futures::Stream <
             Item = (
-                netlink_packet_route::NetlinkMessage<netlink_packet_route::RouteNetlinkMessage>,
+                NetlinkMessage<netlink_packet_route::RouteNetlinkMessage>,
                 SocketAddr,
             ),
         > + Unpin),
@@ -226,8 +223,8 @@ impl Firewall {
                     return Ok(());
                 }
 
-                next = messages.try_next() => {
-                    match next? {
+                next = messages.next() => {
+                    match next {
                         Some((msg, _addr)) => {
                             self.handle_netlink_payload(msg).await?;
                         }
@@ -284,18 +281,18 @@ impl Firewall {
 
     async fn handle_netlink_payload(
         &self,
-        msg: netlink_packet_route::NetlinkMessage<netlink_packet_route::RouteNetlinkMessage>,
+        msg: NetlinkMessage<netlink_packet_route::RouteNetlinkMessage>,
     ) -> anyhow::Result<()> {
         use netlink_packet_route::RouteNetlinkMessage;
 
         match msg.payload {
-            netlink_packet_route::NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) => {
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) => {
                 self.handle_link_message(link).await
             }
-            netlink_packet_route::NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(link)) => {
+            NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(link)) => {
                 self.detach_iface(link.header.index).await
             }
-            _ => Ok(()), // not link-related, ignore
+            _ => Ok(()),
         }
     }
 
@@ -308,7 +305,7 @@ impl Firewall {
         link: netlink_packet_route::link::LinkMessage,
     ) -> anyhow::Result<()> {
         let ifindex = link.header.index;
-        let is_loopback = link.header.flags & LOOPBACK_FLAG != 0;
+        let is_loopback = link.header.flags.contains(LinkFlags::Loopback);
 
         let name = link.attributes.iter().find_map(|attr| {
             if let LinkAttribute::IfName(name) = attr {
@@ -365,8 +362,8 @@ impl Firewall {
     }
 }
 
-fn set_mode_on(bpf: &Ebpf, mode: Mode) -> anyhow::Result<()> {
-    let mut map: Array<_, u32> = Array::try_from(bpf.map("MODE").unwrap().try_clone()?)?;
+fn set_mode_on(bpf: &mut Ebpf, mode: Mode) -> anyhow::Result<()> {
+    let mut map: Array<_, u32> = Array::try_from(bpf.map_mut("MODE").unwrap())?;
     map.set(0, mode as u32, 0)?;
     Ok(())
 }
