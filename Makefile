@@ -22,7 +22,7 @@ build-client:
 # Build agent and copy/rename it to the root directory
 build-agent:
 	cargo build -p ch-agent
-	cp target/debug/crystal-hammer $(AGENT_OUT)
+	cp target/debug/crystal-hammer-agent $(AGENT_OUT)
 
 # ==========================================
 # RUN TARGETS
