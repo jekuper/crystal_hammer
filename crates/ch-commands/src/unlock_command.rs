@@ -20,7 +20,7 @@ impl UnlockAgentCommand {
 
 #[async_trait]
 impl AgentCommand for UnlockAgentCommand {
-    fn name(&self) -> &'static str { "lockdown" }
+    fn name(&self) -> &'static str { "unlock" }
 
     async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
         Firewall::global()
@@ -49,8 +49,8 @@ impl UnlockClientCommand {
 
 #[async_trait]
 impl ClientCommand for UnlockClientCommand {
-    fn name(&self) -> &'static str { "lockdown" }
-    fn short_description(&self) -> &'static str { "configured firewalls to deny everything" }
+    fn name(&self) -> &'static str { "unlock" }
+    fn short_description(&self) -> &'static str { "lifts any firewall blocks" }
     fn help(&self) -> &'static str { 
     "lol" 
     }
