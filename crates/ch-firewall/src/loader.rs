@@ -400,12 +400,14 @@ fn detach_one(inner: &mut Inner, ifindex: u32) -> anyhow::Result<()> {
     match prog.detach(iface.link_id) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("No such device") || msg.contains("ENODEV") {
-                Ok(())
-            } else {
-                Err(e.into())
-            }
+            let e = anyhow::Error::from(e);
+            if is_enodev(&e) { Ok(()) } else { Err(e) }
         }
     }
+}
+
+fn is_enodev(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|src| src.downcast_ref::<std::io::Error>())
+        .any(|io_err| io_err.raw_os_error() == Some(libc::ENODEV))
 }
