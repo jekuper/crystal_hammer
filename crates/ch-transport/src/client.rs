@@ -244,7 +244,7 @@ async fn run_operator_repl(
                         println!("  shell - Start interactive root shell");
                         println!("  exit  - Close session and exit client");
                         println!("  help  - Show this help menu");
-                        let _ = executor.execute("help", &[], &mut session).await;
+                        let _ = executor.execute("help", args, &mut session).await;
                     }
                     other => {
                         if let Err(e) = executor.execute(other, args, &mut session).await {
@@ -567,10 +567,7 @@ fn load_operator_keypair() -> Result<OperatorKeyPair> {
         parse_private_key(&bytes)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to parse private key").into())
     } else {
-        let mut rng = rand::rngs::OsRng;
-        let secret = SigningKey::generate(&mut rng);
-        let public = secret.verifying_key();
-        Ok(OperatorKeyPair { public, secret })
+        return Err(ch_common::Error::Other("Private key not found! ./id_rsa".to_string()));
     }
 }
 

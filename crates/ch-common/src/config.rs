@@ -2,6 +2,10 @@
 //!
 //! `state_dir` is a configurable path (default below), created if it does not exist.
 
+
+pub const CH_PORT: u16 = 2222;
+
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

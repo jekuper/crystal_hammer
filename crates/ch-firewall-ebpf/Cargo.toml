@@ -1,0 +1,23 @@
+# ch-firewall-ebpf/Cargo.toml
+[package]
+name = "ch-firewall-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1"
+network-types = "0.0.7"
+ch-firewall-common = { path = "../ch-firewall-common" }
+
+[[bin]]
+name = "ch-firewall-ebpf"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1
+
+# Detaches this crate from the parent Cargo workspace — required, since it
+# builds for a different target (bpfel-unknown-none) than the rest of your tree.
+[workspace]

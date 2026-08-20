@@ -431,10 +431,27 @@ async fn run_exec(
     let stdout = Box::new(ChannelTx { tx: stdout_tx });
     let stderr = Box::new(ChannelTx { tx: stderr_tx });
 
+    let handle_error = handle.clone();
+
     tokio::spawn(async move {
         let res = executor.execute(command, args, stdout, stderr).await;
-        if let Err(e) = res {
-            tracing::error!("Command execution failed: {}", e);
+        
+        match res {
+            Ok(_) => {
+                let _ = handle_error.exit_status_request(channel_id, 0).await;
+            }
+            Err(e) => {
+                let message = format!("Command execution failed: {}\n", e);
+                tracing::error!("{}", message);
+
+                // Write the error message to the remote host's stderr (extended_data with type 1)
+                let _ = handle_error
+                    .extended_data(channel_id, 1, russh::CryptoVec::from_slice(message.as_bytes()))
+                    .await;
+
+                // Send a non-zero exit status (e.g., 1) to indicate failure
+                let _ = handle_error.exit_status_request(channel_id, 1).await;
+            }
         }
         let _ = stdout_forwarder.await;
         let _ = stderr_forwarder.await;

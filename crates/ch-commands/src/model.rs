@@ -6,7 +6,8 @@ use ch_transport::client::ClientHandler;
 use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
 
-use crate::info_command::{InfoAgentCommand, InfoClientCommand};
+use crate::{info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}};
+use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 
 #[async_trait]
 pub trait AgentCommand: Send + Sync {
@@ -42,6 +43,8 @@ impl AgentCommandRegistry {
     pub fn with_builtins() -> Self {
         let mut r = AgentCommandRegistry { commands: Vec::new() };
         r.register(Box::new(InfoAgentCommand::new()));
+        r.register(Box::new(LockdownAgentCommand::new()));
+        r.register(Box::new(UnlockAgentCommand::new()));
         r
     }
 
@@ -62,6 +65,8 @@ impl ClientCommandRegistry {
     pub fn with_builtins() -> Self {
         let mut r = ClientCommandRegistry { commands: Vec::new() };
         r.register(Box::new(InfoClientCommand::new()));
+        r.register(Box::new(LockdownClientCommand::new()));
+        r.register(Box::new(UnlockClientCommand::new()));
         r
     }
 

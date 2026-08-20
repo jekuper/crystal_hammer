@@ -1,5 +1,6 @@
 # Added by Cargo: contains all compiled artifacts and dependencies
 /target/
+/crates/ch-firewall-ebpf/target
 
 # Remove this if you want to force check-in of your Cargo.lock (see guide below)
 # Cargo.lock
