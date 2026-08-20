@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 
 
 #[derive(Debug, Clone)]
@@ -70,20 +71,49 @@ impl InfoAgentCommand {
             Err(e) => format!("Error reading mode: {}", e),
         };
 
+        // Helper closure to check if a binary exists in common system paths
+        let has_binary = |binary_name: &str| -> bool {
+            let paths = [
+                format!("/usr/sbin/{}", binary_name),
+                format!("/sbin/{}", binary_name),
+                format!("/usr/bin/{}", binary_name),
+                format!("/bin/{}", binary_name),
+            ];
+            paths.iter().any(|p| Path::new(p).exists())
+        };
+
         let mut tools = Vec::new();
-        if fs::metadata("/usr/sbin/nft").is_ok() || fs::metadata("/sbin/nft").is_ok() {
+
+        // 1. Core Backends
+        if has_binary("nft") {
             tools.push("nftables");
         }
-        if fs::metadata("/usr/sbin/iptables").is_ok() || fs::metadata("/sbin/iptables").is_ok() {
+        if has_binary("iptables") {
             tools.push("iptables");
         }
+
+        // 2. Debian/Ubuntu Frontend
+        if has_binary("ufw") {
+            tools.push("UFW");
+        }
+
+        // 3. RHEL/Fedora/CentOS & Modern SUSE Frontend
+        if has_binary("firewall-cmd") {
+            tools.push("firewalld");
+        }
+
+        // 4. Legacy SUSE Frontend
+        if has_binary("SuSEfirewall2") {
+            tools.push("SuSEfirewall2");
+        }
+
         let tools_str = if tools.is_empty() {
             "None detected".to_string()
         } else {
-            tools.join(", ")
+            tools.join("\n")
         };
 
-        format!("eBPF ({}) [System backends present: {}]", mode_str, tools_str)
+        format!("eBPF ({})\nSystem backends present: {}", mode_str, tools_str)
     }
 
     fn get_all_listeners(&self) -> String {
@@ -160,7 +190,7 @@ impl InfoAgentCommand {
         if users.is_empty() {
             "None".to_string()
         } else {
-            users.join(", ")
+            users.join("\n")
         }
     }
 
@@ -266,7 +296,7 @@ impl AgentCommand for InfoAgentCommand {
 
         if show_firewall {
             report.push_str("--- Firewall Backend & State ---\n");
-            report.push_str(&format!("Status: {}\n\n", self.get_firewall_status().await));
+            report.push_str(&format!("{}\n\n", self.get_firewall_status().await));
         }
 
         if show_listeners {
@@ -280,7 +310,7 @@ impl AgentCommand for InfoAgentCommand {
             report.push_str("Logged-in Sessions (utmp/loginuid):\n");
             report.push_str(&self.get_logged_in_users());
             report.push_str("\nAll System Users (login shells):\n");
-            report.push_str(&format!("- {}\n\n", self.get_all_users()));
+            report.push_str(&format!("{}\n\n", self.get_all_users()));
         }
 
         if show_auth {
