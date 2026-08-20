@@ -228,8 +228,15 @@ impl InfoAgentCommand {
             }
         }
 
-        // Collect entries as (uid, formatted_string) so we can sort numerically
-        let mut entries: Vec<(u32, String)> = Vec::new();
+        // Collect raw fields (uid, username, shell, groups) before formatting
+        struct Row {
+            uid: u32,
+            username: String,
+            shell: String,
+            groups: String,
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
 
         if let Ok(content) = fs::read_to_string("/etc/passwd") {
             for line in content.lines() {
@@ -240,7 +247,6 @@ impl InfoAgentCommand {
                     let primary_gid = parts[3];
                     let shell = parts[6];
 
-                    // Skip entries with unparseable UIDs rather than crashing
                     let uid: u32 = match uid_str.parse() {
                         Ok(v) => v,
                         Err(_) => continue,
@@ -260,38 +266,97 @@ impl InfoAgentCommand {
                         }
                     }
 
-                    let formatted = format!(
-                        "{} (uid={}, shell={}, groups=[{}])",
-                        username,
+                    rows.push(Row {
                         uid,
-                        shell,
-                        groups.join(", ")
-                    );
-
-                    entries.push((uid, formatted));
+                        username: username.to_string(),
+                        shell: shell.to_string(),
+                        groups: groups.join(", "),
+                    });
                 }
             }
         }
 
         // Sort by UID ascending
-        entries.sort_by_key(|(uid, _)| *uid);
+        rows.sort_by_key(|r| r.uid);
 
-        let mut users = Vec::new();
-        let mut inserted_separator = false;
+        if rows.is_empty() {
+            return "None".to_string();
+        }
 
-        for (uid, formatted) in entries {
-            if !inserted_separator && uid >= 1000 {
-                users.push(String::new()); // blank line marks the system/user boundary
-                inserted_separator = true;
+        // Compute max column widths, including headers
+        let uid_header = "UID";
+        let user_header = "USERNAME";
+        let shell_header = "SHELL";
+        let groups_header = "GROUPS";
+
+        let uid_width = rows
+            .iter()
+            .map(|r| r.uid.to_string().len())
+            .max()
+            .unwrap_or(0)
+            .max(uid_header.len());
+
+        let user_width = rows
+            .iter()
+            .map(|r| r.username.len())
+            .max()
+            .unwrap_or(0)
+            .max(user_header.len());
+
+        let shell_width = rows
+            .iter()
+            .map(|r| r.shell.len())
+            .max()
+            .unwrap_or(0)
+            .max(shell_header.len());
+
+        let groups_width = rows
+            .iter()
+            .map(|r| r.groups.len())
+            .max()
+            .unwrap_or(0)
+            .max(groups_header.len());
+
+        let mut output = Vec::new();
+
+        // Header row
+        output.push(format!(
+            "{:<uid_w$}  {:<user_w$}  {:<shell_w$}  {:<groups_w$}",
+            uid_header,
+            user_header,
+            shell_header,
+            groups_header,
+            uid_w = uid_width,
+            user_w = user_width,
+            shell_w = shell_width,
+            groups_w = groups_width,
+        ));
+
+        // Separator line under header
+        output.push("-".repeat(uid_width + user_width + shell_width + groups_width + 6));
+
+        let mut inserted_boundary = false;
+
+        for row in &rows {
+            if !inserted_boundary && row.uid >= 1000 {
+                output.push(String::new());
+                inserted_boundary = true;
             }
-            users.push(formatted);
+
+            output.push(format!(
+                "{:<uid_w$}  {:<user_w$}  {:<shell_w$}  {:<groups_w$}",
+                row.uid,
+                row.username,
+                row.shell,
+                row.groups,
+                uid_w = uid_width,
+                user_w = user_width,
+                shell_w = shell_width,
+                groups_w = groups_width,
+            ));
         }
 
-        if users.is_empty() {
-            "None".to_string()
-        } else {
-            users.join("\n")
-        }
+        output.join("\n")
     }
 
     fn get_recent_auth_failures(&self) -> String {
