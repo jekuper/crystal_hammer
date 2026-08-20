@@ -244,7 +244,7 @@ async fn run_operator_repl(
                         println!("  shell - Start interactive root shell");
                         println!("  exit  - Close session and exit client");
                         println!("  help  - Show this help menu");
-                        let _ = executor.execute("help", &[], &mut session).await;
+                        let _ = executor.execute("help", args, &mut session).await;
                     }
                     other => {
                         if let Err(e) = executor.execute(other, args, &mut session).await {
