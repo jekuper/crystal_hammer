@@ -448,9 +448,14 @@ fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
 }
 
 
-/// Primary source of truth: walks /proc directly, independent of utmp.
-/// Finds session-leader processes with a real controlling tty.
-fn get_active_shells(uid_map: &HashMap<u32, String>) -> Vec<String> {
+struct ShellSession {
+    user: String,
+    tty: String,
+    pid: i32,
+    ppid: i32,
+}
+
+fn get_active_shells(uid_map: &HashMap<u32, String>) -> Vec<ShellSession> {
     let mut sessions = Vec::new();
     let Ok(entries) = fs::read_dir("/proc") else { return sessions; };
 
@@ -461,14 +466,11 @@ fn get_active_shells(uid_map: &HashMap<u32, String>) -> Vec<String> {
         let stat_path = entry.path().join("stat");
         let Ok(stat) = fs::read_to_string(&stat_path) else { continue };
 
-        // comm field can contain spaces/parens, so split after the LAST ')'
         let Some(rparen) = stat.rfind(')') else { continue };
         let rest: Vec<&str> = stat[rparen + 2..].split_whitespace().collect();
-        // fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) ...
         let (Some(&sid_str), Some(&tty_nr_str)) = (rest.get(3), rest.get(4)) else { continue };
         let (Ok(sid), Ok(tty_nr)) = (sid_str.parse::<i32>(), tty_nr_str.parse::<i64>()) else { continue };
 
-        // Only session leaders with a real controlling tty
         if pid != sid || tty_nr == 0 {
             continue;
         }
@@ -481,13 +483,16 @@ fn get_active_shells(uid_map: &HashMap<u32, String>) -> Vec<String> {
             .find(|l| l.starts_with("Uid:"))
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse::<u32>().ok());
+        let ppid = status
+            .lines()
+            .find(|l| l.starts_with("PPid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
 
         if let Some(uid) = uid {
-            let user = uid_map
-                .get(&uid)
-                .cloned()
-                .unwrap_or_else(|| uid.to_string());
-            sessions.push(format!("{} (on {}, pid {})", user, tty_name, pid));
+            let user = uid_map.get(&uid).cloned().unwrap_or_else(|| uid.to_string());
+            sessions.push(ShellSession { user, tty: tty_name, pid, ppid });
         }
     }
 

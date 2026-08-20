@@ -19,4 +19,4 @@ russh.workspace = true
 russh-keys.workspace = true
 rustyline.workspace = true
 async-trait.workspace = true
-libc,workspace = true
+libc.workspace = true
