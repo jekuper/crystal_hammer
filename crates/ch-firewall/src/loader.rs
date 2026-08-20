@@ -117,6 +117,31 @@ impl Firewall {
         Ok(fw)
     }
 
+    pub async fn get_mode(&self) -> anyhow::Result<Mode> {
+        let mut inner = self.inner.lock().await;
+        let map: Array<_, u32> = Array::try_from(inner.bpf.map_mut("MODE").unwrap())?;
+        let val = map.get(&0, 0).unwrap_or(0);
+        if val == 1 {
+            Ok(Mode::Lockdown)
+        } else {
+            Ok(Mode::Regular)
+        }
+    }
+
+    pub async fn get_allowed_ports(&self) -> anyhow::Result<Vec<u16>> {
+        let mut inner = self.inner.lock().await;
+        let map: AyaHashMap<_, u16, u8> =
+            AyaHashMap::try_from(inner.bpf.map_mut("ALLOWED_PORTS").unwrap())?;
+        let mut ports = Vec::new();
+        for key_res in map.keys() {
+            if let Ok(port) = key_res {
+                ports.push(port);
+            }
+        }
+        ports.sort_unstable();
+        Ok(ports)
+    }
+
     // --- mode / allow-list controls ---
 
     pub async fn set_mode(&self, mode: Mode) -> anyhow::Result<()> {
