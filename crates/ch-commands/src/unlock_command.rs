@@ -28,7 +28,7 @@ impl AgentCommand for UnlockAgentCommand {
             .await
             .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
         
-        Firewall::global().remove_allow_port(CH_PORT)
+        Firewall::global().remove_all_allow_ports()
             .await
             .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
 

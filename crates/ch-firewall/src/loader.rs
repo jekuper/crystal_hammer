@@ -145,6 +145,23 @@ impl Firewall {
         Ok(())
     }
 
+    pub async fn remove_all_allow_ports(&self) -> anyhow::Result<()> {
+        let mut inner = self.inner.lock().await;
+        let mut map: AyaHashMap<_, u16, u8> =
+            AyaHashMap::try_from(inner.bpf.map_mut("ALLOWED_PORTS").unwrap())?;
+        
+        let keys: Vec<_> = map
+            .keys()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Delete each key
+        for key in keys {
+            map.remove(&key)?;
+        }
+        Ok(())
+    }
+
     pub async fn block_ip(&self, _addr: IpAddr, _prefix_len: u32) -> anyhow::Result<()> {
         anyhow::bail!("IP blocking is currently disabled")
     }

@@ -9,6 +9,40 @@ use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
 
+/// Parses port specifications similar to nmap.
+/// Supports formats like: "80", "80,443", "8000-8100", or combinations "22,80-90,443".
+fn parse_ports(args: &[String]) -> std::result::Result<Vec<u16>, String> {
+    let mut ports = Vec::new();
+    for arg in args {
+        for part in arg.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if part.contains('-') {
+                let mut range_parts = part.split('-');
+                let start_str = range_parts.next().ok_or_else(|| "Invalid range format".to_string())?.trim();
+                let end_str = range_parts.next().ok_or_else(|| "Invalid range format".to_string())?.trim();
+                if range_parts.next().is_some() {
+                    return Err(format!("Invalid range format: {}", part));
+                }
+                let start = start_str.parse::<u16>().map_err(|_| format!("Invalid start port: {}", start_str))?;
+                let end = end_str.parse::<u16>().map_err(|_| format!("Invalid end port: {}", end_str))?;
+                if start > end {
+                    return Err(format!("Invalid range (start {} is greater than end {}): {}", start, end, part));
+                }
+                ports.extend(start..=end);
+            } else {
+                let port = part.parse::<u16>().map_err(|_| format!("Invalid port format: {}", part))?;
+                ports.push(port);
+            }
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
+}
+
 pub struct LockdownAgentCommand {}
 
 impl LockdownAgentCommand {
@@ -17,27 +51,37 @@ impl LockdownAgentCommand {
     }
 }
 
-
 #[async_trait]
 impl AgentCommand for LockdownAgentCommand {
     fn name(&self) -> &'static str { "lockdown" }
 
     async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+        let additional_ports = parse_ports(&args)
+            .map_err(|e| ch_common::Error::AgentCommand(format!("Port parsing error: {e}")))?;
+
         Firewall::global()
             .set_mode(Mode::Lockdown)
             .await
             .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
         
+        // Ensure administration port remains open
         Firewall::global().allow_port(CH_PORT)
             .await
             .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
 
-        ctx.stdout.write_all("Lockdown enforced. Things are tough, aren't they? :)".as_bytes()).await?;
+        // Apply additional parsed ports
+        for port in additional_ports {
+            if port != CH_PORT {
+                Firewall::global().allow_port(port)
+                    .await
+                    .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
+            }
+        }
+
+        ctx.stdout.write_all("Lockdown enforced. Allowed ports updated.\n".as_bytes()).await?;
         Ok(())
     }
 }
-
-
 
 pub struct LockdownClientCommand {}
 
@@ -50,9 +94,11 @@ impl LockdownClientCommand {
 #[async_trait]
 impl ClientCommand for LockdownClientCommand {
     fn name(&self) -> &'static str { "lockdown" }
-    fn short_description(&self) -> &'static str { "configured firewalls to deny everything" }
+    fn short_description(&self) -> &'static str { "configures firewalls to deny everything except specified ports" }
     fn help(&self) -> &'static str { 
-    "lol" 
+        "Usage: lockdown [ports]\n\n\
+        Locks down the agent firewall, allowing only the management port and any additional specified ports.\n\
+        Supports nmap-style formatting (e.g., 22,80-90,443)." 
     }
 
     async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
@@ -90,7 +136,6 @@ impl ClientCommand for LockdownClientCommand {
                     if exit_status != 0 {
                         tracing::warn!("Remote command exited with status {}", exit_status);
                     }
-                    // don't break here — Eof/Close will follow
                 }
                 russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
                 _ => {}
