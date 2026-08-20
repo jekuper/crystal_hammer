@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
 
 #[derive(Debug, Clone)]
 struct Listener {
@@ -170,11 +172,34 @@ impl InfoAgentCommand {
 
         if sessions.is_empty() {
             report.push_str("No active sessions found\n");
-        } else {
-            for s in sessions {
-                report.push_str(&format!("- {}\n", s));
+            return report;
+        }
+
+        // Group by tty so we only query TIOCGPGRP once per device,
+        // not once per session entry.
+        let mut ttys: Vec<&str> = sessions.iter().map(|s| s.tty.as_str()).collect();
+        ttys.sort();
+        ttys.dedup();
+
+        let mut foreground_by_tty: HashMap<String, String> = HashMap::new();
+        for tty in &ttys {
+            let tty_path = format!("/dev/{}", tty);
+            if let Some(user) = get_foreground_user(&tty_path, &uid_map) {
+                foreground_by_tty.insert(tty.to_string(), user);
             }
         }
+
+        for s in &sessions {
+            let marker = match foreground_by_tty.get(&s.tty) {
+                Some(fg_user) if *fg_user == s.user => " [ACTIVE]",
+                _ => "",
+            };
+            report.push_str(&format!(
+                "- {} (on {}, pid {}, ppid {}){}\n",
+                s.user, s.tty, s.pid, s.ppid, marker
+            ));
+        }
+
         report
     }
 
@@ -476,26 +501,44 @@ fn major_minor(tty_nr: i64) -> (i64, i64) {
     (major, minor)
 }
 
-/// Resolve a tty device to a friendly name. Tries fd/0 symlink first
-/// (most direct — no major/minor guessing), falls back to major/minor math.
 fn resolve_tty_name(proc_pid_path: &std::path::Path, mm: (i64, i64)) -> String {
+    let (major, minor) = mm;
+    if major != 0 || minor != 0 {
+        if (136..=143).contains(&major) {
+            return format!("pts/{}", minor);
+        }
+    }
+    // Only fall back to fd inspection if tty_nr gave nothing useful
     for fd in ["fd/0", "fd/1", "fd/2"] {
         if let Ok(target) = fs::read_link(proc_pid_path.join(fd)) {
             let target_str = target.to_string_lossy();
             if target_str.starts_with("/dev/pts/") || target_str.starts_with("/dev/tty") {
-                return target_str
-                    .trim_start_matches("/dev/")
-                    .to_string();
+                return target_str.trim_start_matches("/dev/").to_string();
             }
         }
     }
+    format!("tty (major {}, minor {})", major, minor)
+}
 
-    let (major, minor) = mm;
-    if (136..=143).contains(&major) {
-        format!("pts/{}", minor)
-    } else {
-        format!("tty (major {}, minor {})", major, minor)
+fn get_foreground_user(tty_path: &str, uid_map: &HashMap<u32, String>) -> Option<String> {
+    let file = OpenOptions::new().read(true).open(tty_path).ok()?;
+    let fd = file.as_raw_fd();
+
+    let mut pgrp: libc::pid_t = 0;
+    let ret = unsafe { libc::ioctl(fd, libc::TIOCGPGRP, &mut pgrp) };
+    if ret != 0 {
+        return None;
     }
+
+    // pgrp id == pid of the process group leader (normally still alive)
+    let status = fs::read_to_string(format!("/proc/{}/status", pgrp)).ok()?;
+    let uid = status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u32>().ok())?;
+
+    Some(uid_map.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
 }
 
 fn get_uid_to_username_map() -> HashMap<u32, String> {
