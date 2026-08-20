@@ -1,4 +1,5 @@
 // File: crates/ch-agent/src/main.rs
+
 //! Crystal Hammer agent: on-host, root, autonomous from T0 (SPECS 13.2).
 
 #![forbid(unsafe_code)]
@@ -7,8 +8,6 @@ use anyhow::{Context, Result};
 use ch_common::config::CH_PORT;
 use ch_firewall::loader::Firewall;
 use std::sync::Arc;
-
-
 
 struct AgentExecutor {
     registry: ch_commands::model::AgentCommandRegistry,
@@ -61,10 +60,6 @@ async fn main() -> Result<()> {
     let key = ch_common::keys::team_pubkey()
         .context("No embedded public key found in agent binary")?;
 
-    // Registries are the extension seams; construct them up front.
-    tracing::info!("Loading firewall backend...");
-//    let _firewall = ch_firewall::Registry::with_builtins();
-    
     tracing::info!("Loading persistence mechanisms...");
     let _persistence = ch_persistence::Registry::with_builtins();
     
@@ -87,10 +82,25 @@ async fn main() -> Result<()> {
     let firewall = Firewall::init_global()?;
     let handle = firewall.clone().spawn_supervised();
     
-    // Start the SPA-gated listener on configured port
     let port = CH_PORT;
-    ch_transport::serve(port, &key, executor).await?;
 
+    // Run the listener until a shutdown signal is intercepted
+    tokio::select! {
+        res = ch_transport::serve(port, &key, executor) => {
+            if let Err(e) = res {
+                tracing::error!("Server error: {:?}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received Ctrl-C, exiting gracefully");
+        }
+        _ = sigterm_signal() => {
+            tracing::info!("Received SIGTERM, exiting gracefully");
+        }
+    }
+
+    // Trigger graceful firewall cleanup and wait for detachment to complete
+    tracing::info!("Shutting down firewall and detaching interfaces");
     firewall.shutdown();
     let _ = handle.await;
     
@@ -112,4 +122,19 @@ fn is_root() -> bool {
     {
         false
     }
+}
+
+#[cfg(unix)]
+async fn sigterm_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    if let Ok(mut stream) = signal(SignalKind::terminate()) {
+        stream.recv().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn sigterm_signal() {
+    std::future::pending::<()>().await;
 }
