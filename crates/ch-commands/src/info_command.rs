@@ -175,28 +175,27 @@ impl InfoAgentCommand {
             return report;
         }
 
-        // Group by tty so we only query TIOCGPGRP once per device,
-        // not once per session entry.
         let mut ttys: Vec<&str> = sessions.iter().map(|s| s.tty.as_str()).collect();
         ttys.sort();
         ttys.dedup();
 
-        let mut foreground_by_tty: HashMap<String, String> = HashMap::new();
+        report.push_str("Logged-in Sessions:\n");
         for tty in &ttys {
             let tty_path = format!("/dev/{}", tty);
-            if let Some(user) = get_foreground_user(&tty_path, &uid_map) {
-                foreground_by_tty.insert(tty.to_string(), user);
+            match get_foreground_user(&tty_path, &uid_map) {
+                Some(user) => report.push_str(&format!("- {} (on {})\n", user, tty)),
+                None => report.push_str(&format!("- unknown (on {})\n", tty)),
             }
         }
 
+        // Keep the session-leader list too, but label it clearly as
+        // process/session structure, not "who's logged in" — it can include
+        // supervisory processes (like sudo's monitor) that aren't the real user.
+        report.push_str("\nSession leader processes (structure, not identity):\n");
         for s in &sessions {
-            let marker = match foreground_by_tty.get(&s.tty) {
-                Some(fg_user) if *fg_user == s.user => " [ACTIVE]",
-                _ => "",
-            };
             report.push_str(&format!(
-                "- {} (on {}, pid {}, ppid {}){}\n",
-                s.user, s.tty, s.pid, s.ppid, marker
+                "- {} (on {}, pid {}, ppid {})\n",
+                s.user, s.tty, s.pid, s.ppid
             ));
         }
 
