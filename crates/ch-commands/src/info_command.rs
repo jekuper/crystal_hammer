@@ -204,16 +204,12 @@ impl InfoAgentCommand {
     }
 
     fn get_all_users(&self) -> String {
-        let mut users = Vec::new();
-
-        // Build a map of gid -> group name, and username -> supplementary group names
         let mut gid_to_name: HashMap<String, String> = HashMap::new();
         let mut user_to_groups: HashMap<String, Vec<String>> = HashMap::new();
 
         if let Ok(group_content) = fs::read_to_string("/etc/group") {
             for line in group_content.lines() {
                 let parts: Vec<&str> = line.split(':').collect();
-                // name:password:gid:member1,member2,...
                 if parts.len() >= 4 {
                     let group_name = parts[0];
                     let gid = parts[2];
@@ -232,23 +228,29 @@ impl InfoAgentCommand {
             }
         }
 
+        // Collect entries as (uid, formatted_string) so we can sort numerically
+        let mut entries: Vec<(u32, String)> = Vec::new();
+
         if let Ok(content) = fs::read_to_string("/etc/passwd") {
             for line in content.lines() {
                 let parts: Vec<&str> = line.split(':').collect();
-                // name:password:uid:gid:gecos:home:shell
                 if parts.len() >= 7 {
                     let username = parts[0];
-                    let uid = parts[2];
+                    let uid_str = parts[2];
                     let primary_gid = parts[3];
                     let shell = parts[6];
 
-                    // Resolve primary group name (fall back to raw gid if unknown)
+                    // Skip entries with unparseable UIDs rather than crashing
+                    let uid: u32 = match uid_str.parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
                     let primary_group = gid_to_name
                         .get(primary_gid)
                         .cloned()
                         .unwrap_or_else(|| primary_gid.to_string());
 
-                    // Collect all groups: primary + supplementary, deduplicated
                     let mut groups = vec![primary_group.clone()];
                     if let Some(supp) = user_to_groups.get(username) {
                         for g in supp {
@@ -258,15 +260,31 @@ impl InfoAgentCommand {
                         }
                     }
 
-                    users.push(format!(
+                    let formatted = format!(
                         "{} (uid={}, shell={}, groups=[{}])",
                         username,
                         uid,
                         shell,
                         groups.join(", ")
-                    ));
+                    );
+
+                    entries.push((uid, formatted));
                 }
             }
+        }
+
+        // Sort by UID ascending
+        entries.sort_by_key(|(uid, _)| *uid);
+
+        let mut users = Vec::new();
+        let mut inserted_separator = false;
+
+        for (uid, formatted) in entries {
+            if !inserted_separator && uid >= 1000 {
+                users.push(String::new()); // blank line marks the system/user boundary
+                inserted_separator = true;
+            }
+            users.push(formatted);
         }
 
         if users.is_empty() {
