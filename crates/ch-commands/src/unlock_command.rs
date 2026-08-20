@@ -32,7 +32,7 @@ impl AgentCommand for UnlockAgentCommand {
             .await
             .map_err(|e| ch_common::Error::AgentCommand(format!("{e:#}")))?;
 
-        ctx.stdout.write_all("Lockdown lifted. The storm is over?".as_bytes()).await?;
+        ctx.stdout.write_all("Lockdown lifted. The storm is over?\n".as_bytes()).await?;
         Ok(())
     }
 }
