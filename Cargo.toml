@@ -26,6 +26,7 @@ repository = "https://github.com/Jekuper/crystal_hammer"
 # Error handling
 anyhow = "1"
 thiserror = "1"
+tabled = "0.21"
 
 # Serialization / config
 serde = { version = "1", features = ["derive"] }

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;
+use tabled::{Table, Tabled};
 
 #[derive(Debug, Clone)]
 struct Listener {
@@ -18,6 +19,18 @@ struct Listener {
     local_ip: String,
     local_port: u16,
     inode: u64,
+}
+
+#[derive(Tabled)]
+struct UserRow {
+    #[tabled(rename = "UID")]
+    uid: u32,
+    #[tabled(rename = "USERNAME")]
+    username: String,
+    #[tabled(rename = "SHELL")]
+    shell: String,
+    #[tabled(rename = "GROUPS")]
+    groups: String,
 }
 
 
@@ -215,9 +228,8 @@ impl InfoAgentCommand {
                     let gid = parts[2];
                     gid_to_name.insert(gid.to_string(), group_name.to_string());
 
-                    let members = parts[3];
-                    if !members.is_empty() {
-                        for member in members.split(',') {
+                    if !parts[3].is_empty() {
+                        for member in parts[3].split(',') {
                             user_to_groups
                                 .entry(member.to_string())
                                 .or_insert_with(Vec::new)
@@ -228,36 +240,26 @@ impl InfoAgentCommand {
             }
         }
 
-        // Collect raw fields (uid, username, shell, groups) before formatting
-        struct Row {
-            uid: u32,
-            username: String,
-            shell: String,
-            groups: String,
-        }
-
-        let mut rows: Vec<Row> = Vec::new();
+        let mut rows: Vec<UserRow> = Vec::new();
 
         if let Ok(content) = fs::read_to_string("/etc/passwd") {
             for line in content.lines() {
                 let parts: Vec<&str> = line.split(':').collect();
                 if parts.len() >= 7 {
                     let username = parts[0];
-                    let uid_str = parts[2];
-                    let primary_gid = parts[3];
-                    let shell = parts[6];
-
-                    let uid: u32 = match uid_str.parse() {
+                    let uid: u32 = match parts[2].parse() {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
+                    let primary_gid = parts[3];
+                    let shell = parts[6];
 
                     let primary_group = gid_to_name
                         .get(primary_gid)
                         .cloned()
                         .unwrap_or_else(|| primary_gid.to_string());
 
-                    let mut groups = vec![primary_group.clone()];
+                    let mut groups = vec![primary_group];
                     if let Some(supp) = user_to_groups.get(username) {
                         for g in supp {
                             if !groups.contains(g) {
@@ -266,7 +268,7 @@ impl InfoAgentCommand {
                         }
                     }
 
-                    rows.push(Row {
+                    rows.push(UserRow {
                         uid,
                         username: username.to_string(),
                         shell: shell.to_string(),
@@ -276,87 +278,13 @@ impl InfoAgentCommand {
             }
         }
 
-        // Sort by UID ascending
         rows.sort_by_key(|r| r.uid);
 
         if rows.is_empty() {
-            return "None".to_string();
+            "None".to_string()
+        } else {
+            Table::new(rows).to_string()
         }
-
-        // Compute max column widths, including headers
-        let uid_header = "UID";
-        let user_header = "USERNAME";
-        let shell_header = "SHELL";
-        let groups_header = "GROUPS";
-
-        let uid_width = rows
-            .iter()
-            .map(|r| r.uid.to_string().len())
-            .max()
-            .unwrap_or(0)
-            .max(uid_header.len());
-
-        let user_width = rows
-            .iter()
-            .map(|r| r.username.len())
-            .max()
-            .unwrap_or(0)
-            .max(user_header.len());
-
-        let shell_width = rows
-            .iter()
-            .map(|r| r.shell.len())
-            .max()
-            .unwrap_or(0)
-            .max(shell_header.len());
-
-        let groups_width = rows
-            .iter()
-            .map(|r| r.groups.len())
-            .max()
-            .unwrap_or(0)
-            .max(groups_header.len());
-
-        let mut output = Vec::new();
-
-        // Header row
-        output.push(format!(
-            "{:<uid_w$}  {:<user_w$}  {:<shell_w$}  {:<groups_w$}",
-            uid_header,
-            user_header,
-            shell_header,
-            groups_header,
-            uid_w = uid_width,
-            user_w = user_width,
-            shell_w = shell_width,
-            groups_w = groups_width,
-        ));
-
-        // Separator line under header
-        output.push("-".repeat(uid_width + user_width + shell_width + groups_width + 6));
-
-        let mut inserted_boundary = false;
-
-        for row in &rows {
-            if !inserted_boundary && row.uid >= 1000 {
-                output.push(String::new());
-                inserted_boundary = true;
-            }
-
-            output.push(format!(
-                "{:<uid_w$}  {:<user_w$}  {:<shell_w$}  {:<groups_w$}",
-                row.uid,
-                row.username,
-                row.shell,
-                row.groups,
-                uid_w = uid_width,
-                user_w = user_width,
-                shell_w = shell_width,
-                groups_w = groups_width,
-            ));
-        }
-
-        output.join("\n")
     }
 
     fn get_recent_auth_failures(&self) -> String {
