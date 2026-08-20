@@ -390,18 +390,32 @@ fn attach_one(inner: &mut Inner, ifindex: u32, name: &str) -> anyhow::Result<()>
 
 fn detach_one(inner: &mut Inner, ifindex: u32) -> anyhow::Result<()> {
     let Some(iface) = inner.attached.remove(&ifindex) else {
-        return Ok(()); // not tracked — nothing to do
+        tracing::debug!("firewall: detach_one({ifindex}) called but not tracked, skipping");
+        return Ok(());
     };
 
+    tracing::info!(
+        "firewall: detaching from {} (ifindex {ifindex}), link_id={:?}",
+        iface.name, iface.link_id
+    );
+
     let prog: &mut SchedClassifier = inner.bpf.program_mut("ch_firewall").unwrap().try_into()?;
-    // If the interface is already gone (DelLink race), the kernel will
-    // already have torn down the filter along with it — treat "not found"
-    // as success rather than a fatal error.
-    match prog.detach(iface.link_id) {
+    let result = prog.detach(iface.link_id);
+    tracing::info!(
+        "firewall: prog.detach() for {} (ifindex {ifindex}) returned {:?}",
+        iface.name, result
+    );
+
+    match result {
         Ok(()) => Ok(()),
         Err(e) => {
             let e = anyhow::Error::from(e);
-            if is_enodev(&e) { Ok(()) } else { Err(e) }
+            if is_enodev(&e) {
+                tracing::info!("firewall: detach for {} got ENODEV, treating as success", iface.name);
+                Ok(())
+            } else {
+                Err(e)
+            }
         }
     }
 }
