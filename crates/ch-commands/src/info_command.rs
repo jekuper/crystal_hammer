@@ -205,16 +205,70 @@ impl InfoAgentCommand {
 
     fn get_all_users(&self) -> String {
         let mut users = Vec::new();
-        if let Ok(content) = fs::read_to_string("/etc/passwd") {
-            for line in content.lines() {
+
+        // Build a map of gid -> group name, and username -> supplementary group names
+        let mut gid_to_name: HashMap<String, String> = HashMap::new();
+        let mut user_to_groups: HashMap<String, Vec<String>> = HashMap::new();
+
+        if let Ok(group_content) = fs::read_to_string("/etc/group") {
+            for line in group_content.lines() {
                 let parts: Vec<&str> = line.split(':').collect();
-                if parts.len() >= 7 {
-                    let username = parts[0];
-                    let shell = parts[6];
-                    users.push(format!("{} ({})", username, shell));
+                // name:password:gid:member1,member2,...
+                if parts.len() >= 4 {
+                    let group_name = parts[0];
+                    let gid = parts[2];
+                    gid_to_name.insert(gid.to_string(), group_name.to_string());
+
+                    let members = parts[3];
+                    if !members.is_empty() {
+                        for member in members.split(',') {
+                            user_to_groups
+                                .entry(member.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(group_name.to_string());
+                        }
+                    }
                 }
             }
         }
+
+        if let Ok(content) = fs::read_to_string("/etc/passwd") {
+            for line in content.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                // name:password:uid:gid:gecos:home:shell
+                if parts.len() >= 7 {
+                    let username = parts[0];
+                    let uid = parts[2];
+                    let primary_gid = parts[3];
+                    let shell = parts[6];
+
+                    // Resolve primary group name (fall back to raw gid if unknown)
+                    let primary_group = gid_to_name
+                        .get(primary_gid)
+                        .cloned()
+                        .unwrap_or_else(|| primary_gid.to_string());
+
+                    // Collect all groups: primary + supplementary, deduplicated
+                    let mut groups = vec![primary_group.clone()];
+                    if let Some(supp) = user_to_groups.get(username) {
+                        for g in supp {
+                            if !groups.contains(g) {
+                                groups.push(g.clone());
+                            }
+                        }
+                    }
+
+                    users.push(format!(
+                        "{} (uid={}, shell={}, groups=[{}])",
+                        username,
+                        uid,
+                        shell,
+                        groups.join(", ")
+                    ));
+                }
+            }
+        }
+
         if users.is_empty() {
             "None".to_string()
         } else {
