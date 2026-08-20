@@ -15,9 +15,20 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
         &self,
         command: &str,
         args: &[String],
-        session: &mut russh::client::Handle<ch_transport::client::ClientHandler>, // <--- Update signature
+        session: &mut russh::client::Handle<ch_transport::client::ClientHandler>,
     ) -> std::result::Result<(), String> {
         if command == "help" {
+            // If an argument is provided, look up the specific command's help text
+            if let Some(target_command) = args.first() {
+                if let Some(cmd) = self.registry.find(target_command) {
+                    println!("{}", cmd.help());
+                    return Ok(());
+                } else {
+                    return Err(format!("Unknown command: '{}'", target_command));
+                }
+            }
+
+            // Default behavior: list all registered commands
             println!("Registered commands:");
             let mut help_summary = "".to_string();
             for command in self.registry.iter() {
@@ -31,7 +42,7 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
         }
 
         if let Some(cmd) = self.registry.find(command) {
-            let ctx = ch_commands::model::ClientContext { session }; // <--- Borrow naturally
+            let ctx = ch_commands::model::ClientContext { session };
             cmd.execute(args, ctx)
                 .await
                 .map_err(|e| e.to_string())
