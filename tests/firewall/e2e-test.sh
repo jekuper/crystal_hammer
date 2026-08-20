@@ -13,7 +13,7 @@
 # Usage:
 #   sudo ./e2e-test.sh <agent-binary-path> <client-binary-path>
 #
-# Requires: bash 4+, ip, tc, curl or ping, awk, grep. bpftool is optional.
+# Requires: bash 4+, ip, tc, curl or ping, awk, grep, ip netns. bpftool is optional.
 
 set -u
 
@@ -25,6 +25,20 @@ CLIENT_BIN="${2:-${SCRIPT_DIR}/../../target/debug/client}"
 
 TEST_IFACE_A="cwtest0"
 TEST_IFACE_B="cwtest0-peer"
+
+NETNS_NAME="ch-e2e-remote"
+VETH_HOST="ch-e2e-vh"
+VETH_NS="ch-e2e-vn"
+HOST_IP="10.99.0.1"
+NS_IP="10.99.0.2"
+HOST_ADDR="${HOST_IP}/30"
+NS_ADDR="${NS_IP}/30"
+
+# Override with: TEST_ALLOWED_PORT=8080 ./e2e-test.sh ...
+TEST_ALLOWED_PORT="${TEST_ALLOWED_PORT:-4422}"
+TEST_BLOCKED_PORT="4423"   # deliberately never allow-listed -- the negative control
+
+LISTENER_PID=""
 
 ATTACH_TIMEOUT=15      # seconds to wait for "attaching to new interface" log lines
 SHUTDOWN_TIMEOUT=10    # seconds to wait for the agent to exit cleanly
@@ -90,6 +104,73 @@ check_internet() {
     fi
 }
 
+start_listener() {
+    # start_listener <port> -- binds something to <port> on the host side so
+    # an "allowed" test reads as an actual connection, not a refused one.
+    local port="$1"
+    if command -v nc >/dev/null 2>&1; then
+        (nc -lk "$port" >/dev/null 2>&1 &) 2>/dev/null
+        sleep 0.3
+        LISTENER_PID=$(ss -ltnp 2>/dev/null | awk -v p=":$port\$" '$4 ~ p' | grep -oP 'pid=\K[0-9]+' | head -n1)
+        [[ -n "$LISTENER_PID" ]] && return 0
+    fi
+    if command -v socat >/dev/null 2>&1; then
+        socat TCP-LISTEN:"$port",fork,reuseaddr /dev/null >/dev/null 2>&1 &
+        LISTENER_PID=$!
+        sleep 0.3
+        is_pid_alive "$LISTENER_PID" && return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('0.0.0.0', $port)); s.listen(5)
+while True:
+    c, _ = s.accept(); c.close()
+" >/dev/null 2>&1 &
+        LISTENER_PID=$!
+        sleep 0.3
+        is_pid_alive "$LISTENER_PID" && return 0
+    fi
+    return 1
+}
+
+stop_listener() {
+    [[ -n "$LISTENER_PID" ]] && kill "$LISTENER_PID" 2>/dev/null
+    LISTENER_PID=""
+}
+
+setup_remote_ns() {
+    ip netns add "$NETNS_NAME" 2>>"${WORKDIR}/setup.log" || return 1
+    ip link add "$VETH_HOST" type veth peer name "$VETH_NS" 2>>"${WORKDIR}/setup.log" || {
+        ip netns del "$NETNS_NAME" 2>/dev/null; return 1
+    }
+    ip link set "$VETH_NS" netns "$NETNS_NAME"     2>>"${WORKDIR}/setup.log"
+    ip addr add "$HOST_ADDR" dev "$VETH_HOST"       2>>"${WORKDIR}/setup.log"
+    ip link set "$VETH_HOST" up                     2>>"${WORKDIR}/setup.log"
+    ip netns exec "$NETNS_NAME" ip addr add "$NS_ADDR" dev "$VETH_NS" 2>>"${WORKDIR}/setup.log"
+    ip netns exec "$NETNS_NAME" ip link set "$VETH_NS" up             2>>"${WORKDIR}/setup.log"
+    ip netns exec "$NETNS_NAME" ip link set lo up                     2>>"${WORKDIR}/setup.log"
+}
+
+teardown_remote_ns() {
+    # Deleting the namespace destroys veth-ns, which also destroys
+    # veth-host simultaneously -- same ENODEV race as the cwtest pair,
+    # already asserted by test 5b, so we don't re-check it here.
+    ip netns del "$NETNS_NAME" 2>/dev/null || true
+}
+
+port_reachable_from_remote() {
+    # port_reachable_from_remote <port> <timeout-secs>
+    local port="$1" timeout_s="${2:-3}"
+    if command -v nc >/dev/null 2>&1; then
+        ip netns exec "$NETNS_NAME" nc -zv -w "$timeout_s" "$HOST_IP" "$port" 2>>"${WORKDIR}/portscan.log"
+        return $?
+    fi
+    ip netns exec "$NETNS_NAME" timeout "$timeout_s" bash -c "echo > /dev/tcp/${HOST_IP}/${port}" 2>>"${WORKDIR}/portscan.log"
+}
+
 # ---------------------------------------------------------------------------
 # cleanup -- always runs, pass or fail
 # ---------------------------------------------------------------------------
@@ -128,6 +209,9 @@ cleanup() {
         sleep 1
         kill -9 "$AGENT_PID" 2>/dev/null || true
     fi
+
+    stop_listener
+    teardown_remote_ns
 
     if [[ -x "$CLEANUP_SCRIPT" ]]; then
         "$CLEANUP_SCRIPT" \
@@ -338,6 +422,43 @@ if is_pid_alive "$AGENT_PID"; then
             record "internet blocked while in lockdown" "FAIL" "connectivity still worked after 'lockdown'"
         else
             record "internet blocked while in lockdown" "PASS"
+        fi
+
+        # --- remote reachability via network namespace ---
+        # Confirms lockdown blocks at the packet level (not just breaks our
+        # own outbound curl) and that an explicitly allowed port stays open
+        # while everything else doesn't.
+        if setup_remote_ns; then
+            if wait_for_log_pattern "$AGENT_LOG" "attaching to new interface $VETH_HOST" "$ATTACH_TIMEOUT"; then
+                if port_reachable_from_remote "$TEST_BLOCKED_PORT" 3; then
+                    record "unallowed port blocked from remote during lockdown" "FAIL" "connected to a port that was never allow-listed"
+                else
+                    record "unallowed port blocked from remote during lockdown" "PASS"
+                fi
+
+                # NOTE: match this to whatever syntax the client ends up
+                # using for allow-listing a port during lockdown.
+                echo "lockdown ${TEST_ALLOWED_PORT}" >&"$CLIENT_FD"
+                sleep "$LOCKDOWN_SETTLE"
+
+                if start_listener "$TEST_ALLOWED_PORT"; then
+                    if port_reachable_from_remote "$TEST_ALLOWED_PORT" 3; then
+                        record "allow-listed port reachable from remote during lockdown" "PASS"
+                    else
+                        record "allow-listed port reachable from remote during lockdown" "FAIL" "port stayed blocked after allow-listing"
+                    fi
+                    stop_listener
+                else
+                    record "allow-listed port reachable from remote during lockdown" "SKIP" "no nc/socat/python3 available to bind a test listener"
+                fi
+            else
+                record "unallowed port blocked from remote during lockdown" "SKIP" "veth-host never attached, see $AGENT_LOG"
+                record "allow-listed port reachable from remote during lockdown" "SKIP" "veth-host never attached, see $AGENT_LOG"
+            fi
+            teardown_remote_ns
+        else
+            record "unallowed port blocked from remote during lockdown" "SKIP" "could not set up test namespace, see ${WORKDIR}/setup.log"
+            record "allow-listed port reachable from remote during lockdown" "SKIP" "could not set up test namespace, see ${WORKDIR}/setup.log"
         fi
 
         echo "unlock" >&"$CLIENT_FD"
