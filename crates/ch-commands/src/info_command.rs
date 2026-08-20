@@ -162,14 +162,17 @@ impl InfoAgentCommand {
         report
     }
 
+    
     fn get_logged_in_users(&self) -> String {
         let mut report = String::new();
-        let utmp_users = get_logged_in_users_utmp();
-        if utmp_users.is_empty() {
-            report.push_str("No active utmp sessions\n");
+        let uid_map = get_uid_to_username_map();
+        let sessions = get_active_shells(&uid_map);
+
+        if sessions.is_empty() {
+            report.push_str("No active sessions found\n");
         } else {
-            for u in utmp_users {
-                report.push_str(&format!("- {}\n", u));
+            for s in sessions {
+                report.push_str(&format!("- {}\n", s));
             }
         }
         report
@@ -419,58 +422,80 @@ fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
     map
 }
 
-fn get_logged_in_users_utmp() -> Vec<String> {
-    let mut users = Vec::new();
-    let paths = ["/run/utmp", "/var/run/utmp"];
-    let mut content = None;
-    for p in &paths {
-        if let Ok(bytes) = fs::read(p) {
-            content = Some(bytes);
-            break;
+
+/// Primary source of truth: walks /proc directly, independent of utmp.
+/// Finds session-leader processes with a real controlling tty.
+fn get_active_shells(uid_map: &HashMap<u32, String>) -> Vec<String> {
+    let mut sessions = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else { return sessions; };
+
+    for entry in entries.flatten() {
+        let pid_str = entry.file_name().to_string_lossy().to_string();
+        let Ok(pid) = pid_str.parse::<i32>() else { continue };
+
+        let stat_path = entry.path().join("stat");
+        let Ok(stat) = fs::read_to_string(&stat_path) else { continue };
+
+        // comm field can contain spaces/parens, so split after the LAST ')'
+        let Some(rparen) = stat.rfind(')') else { continue };
+        let rest: Vec<&str> = stat[rparen + 2..].split_whitespace().collect();
+        // fields after comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) ...
+        let (Some(&sid_str), Some(&tty_nr_str)) = (rest.get(3), rest.get(4)) else { continue };
+        let (Ok(sid), Ok(tty_nr)) = (sid_str.parse::<i32>(), tty_nr_str.parse::<i64>()) else { continue };
+
+        // Only session leaders with a real controlling tty
+        if pid != sid || tty_nr == 0 {
+            continue;
+        }
+
+        let tty_name = resolve_tty_name(&entry.path(), major_minor(tty_nr));
+
+        let Ok(status) = fs::read_to_string(entry.path().join("status")) else { continue };
+        let uid = status
+            .lines()
+            .find(|l| l.starts_with("Uid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u32>().ok());
+
+        if let Some(uid) = uid {
+            let user = uid_map
+                .get(&uid)
+                .cloned()
+                .unwrap_or_else(|| uid.to_string());
+            sessions.push(format!("{} (on {}, pid {})", user, tty_name, pid));
         }
     }
-    
-    if let Some(bytes) = content {
-        const UTMP_SIZE: usize = 384;
-        for chunk in bytes.chunks_exact(UTMP_SIZE) {
-            let ut_type = u16::from_ne_bytes([chunk[0], chunk[1]]);
-            if ut_type == 7 {
-                let ut_user_bytes = &chunk[44..76];
-                let ut_user = std::str::from_utf8(ut_user_bytes)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .to_string();
 
-                let ut_line_bytes = &chunk[8..40];
-                let ut_line = std::str::from_utf8(ut_line_bytes)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .to_string();
+    sessions
+}
 
-                let ut_host_bytes = &chunk[76..332];
-                let ut_host = std::str::from_utf8(ut_host_bytes)
-                    .unwrap_or("")
-                    .trim_end_matches('\0')
-                    .to_string();
+/// Decode tty_nr from /proc/[pid]/stat into (major, minor).
+fn major_minor(tty_nr: i64) -> (i64, i64) {
+    let major = (tty_nr >> 8) & 0xfff;
+    let minor = (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00);
+    (major, minor)
+}
 
-                if !ut_user.is_empty() {
-                    let host_info = if ut_host.is_empty() {
-                        "".to_string()
-                    } else {
-                        format!(" from {}", ut_host)
-                    };
-                    users.push(format!("{} (on {}){}", ut_user, ut_line, host_info));
-                }
+/// Resolve a tty device to a friendly name. Tries fd/0 symlink first
+/// (most direct — no major/minor guessing), falls back to major/minor math.
+fn resolve_tty_name(proc_pid_path: &std::path::Path, mm: (i64, i64)) -> String {
+    for fd in ["fd/0", "fd/1", "fd/2"] {
+        if let Ok(target) = fs::read_link(proc_pid_path.join(fd)) {
+            let target_str = target.to_string_lossy();
+            if target_str.starts_with("/dev/pts/") || target_str.starts_with("/dev/tty") {
+                return target_str
+                    .trim_start_matches("/dev/")
+                    .to_string();
             }
         }
     }
 
-    if users.is_empty() {
-        let uid_map = get_uid_to_username_map();
-        users = get_active_loginuids(&uid_map);
+    let (major, minor) = mm;
+    if (136..=143).contains(&major) {
+        format!("pts/{}", minor)
+    } else {
+        format!("tty (major {}, minor {})", major, minor)
     }
-
-    users
 }
 
 fn get_uid_to_username_map() -> HashMap<u32, String> {
@@ -487,31 +512,6 @@ fn get_uid_to_username_map() -> HashMap<u32, String> {
         }
     }
     map
-}
-
-fn get_active_loginuids(uid_map: &HashMap<u32, String>) -> Vec<String> {
-    let mut active = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return active;
-    };
-    let mut seen = std::collections::HashSet::new();
-    for entry in entries {
-        let Ok(entry) = entry else { continue; };
-        let path = entry.path();
-        let Ok(_pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        if let Ok(loginuid_str) = fs::read_to_string(path.join("loginuid")) {
-            if let Ok(loginuid) = loginuid_str.trim().parse::<u32>() {
-                if loginuid != 4294967295 && seen.insert(loginuid) {
-                    if let Some(user) = uid_map.get(&loginuid) {
-                        active.push(format!("{} (loginuid: {})", user, loginuid));
-                    }
-                }
-            }
-        }
-    }
-    active
 }
 
 fn get_recent_auth_failures_log() -> Vec<String> {
