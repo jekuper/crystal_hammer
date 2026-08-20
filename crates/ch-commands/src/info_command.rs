@@ -181,11 +181,12 @@ impl InfoAgentCommand {
 
         report.push_str("Logged-in Sessions:\n");
         for tty in &ttys {
-            let tty_path = format!("/dev/{}", tty);
-            match get_foreground_user(&tty_path, &uid_map) {
-                Ok(user) => report.push_str(&format!("- {} (on {})\n", user, tty)),
-                Err(e) => report.push_str(&format!("- unknown (on {}) [{}]\n", tty, e)),
-            }
+            let leader_pid = sessions.iter()
+                .find(|s| s.tty == *tty)
+                .map(|s| s.pid)
+                .unwrap_or(0);
+            let user = get_effective_user_for_tty(tty, leader_pid, &uid_map);
+            report.push_str(&format!("- {} (on {})\n", user, tty));
         }
 
         // Keep the session-leader list too, but label it clearly as
