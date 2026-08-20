@@ -183,8 +183,8 @@ impl InfoAgentCommand {
         for tty in &ttys {
             let tty_path = format!("/dev/{}", tty);
             match get_foreground_user(&tty_path, &uid_map) {
-                Some(user) => report.push_str(&format!("- {} (on {})\n", user, tty)),
-                None => report.push_str(&format!("- unknown (on {})\n", tty)),
+                Ok(user) => report.push_str(&format!("- {} (on {})\n", user, tty)),
+                Err(e) => report.push_str(&format!("- unknown (on {}) [{}]\n", tty, e)),
             }
         }
 
@@ -524,25 +524,110 @@ fn resolve_tty_name(proc_pid_path: &std::path::Path, mm: (i64, i64)) -> String {
     format!("tty (major {}, minor {})", major, minor)
 }
 
-fn get_foreground_user(tty_path: &str, uid_map: &HashMap<u32, String>) -> Option<String> {
-    let file = OpenOptions::new().read(true).open(tty_path).ok()?;
+fn get_foreground_user(
+    tty_path: &str,
+    uid_map: &HashMap<u32, String>,
+) -> std::result::Result<String, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .open(tty_path)
+        .map_err(|e| format!("open({}) failed: {}", tty_path, e))?;
     let fd = file.as_raw_fd();
 
     let mut pgrp: libc::pid_t = 0;
     let ret = unsafe { libc::ioctl(fd, libc::TIOCGPGRP, &mut pgrp) };
     if ret != 0 {
-        return None;
+        return std::result::Result::Err(format!(
+            "ioctl(TIOCGPGRP) on {} failed: {}",
+            tty_path,
+            std::io::Error::last_os_error()
+        ));
+    }
+    if pgrp <= 0 {
+        return std::result::Result::Err(format!("{} returned invalid pgrp {}", tty_path, pgrp));
     }
 
-    // pgrp id == pid of the process group leader (normally still alive)
-    let status = fs::read_to_string(format!("/proc/{}/status", pgrp)).ok()?;
+    let status = fs::read_to_string(format!("/proc/{}/status", pgrp))
+        .map_err(|e| format!("no /proc/{}/status (process gone?): {}", pgrp, e))?;
     let uid = status
         .lines()
         .find(|l| l.starts_with("Uid:"))
         .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse::<u32>().ok())?;
+        .and_then(|s| s.parse::<u32>().ok())
+        .ok_or_else(|| format!("couldn't parse Uid for pgrp {}", pgrp))?;
 
-    Some(uid_map.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
+    std::result::Result::Ok(uid_map.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
+}
+
+fn get_effective_user_for_tty(
+    tty: &str,
+    session_leader_pid: i32,
+    uid_map: &HashMap<u32, String>,
+) -> String {
+    let tty_path = format!("/dev/{}", tty);
+
+    // Try the fast path first
+    if let Ok(user) = get_foreground_user(&tty_path, uid_map) {
+        return user;
+    }
+
+    // Fallback: walk descendants of the session leader, find deepest
+    // process still attached to this tty
+    let all_procs = list_all_procs_with_ppid_and_tty(); // Vec<(pid, ppid, tty_nr_resolved)>
+
+    let mut deepest_pid = session_leader_pid;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &(pid, ppid, ref proc_tty) in &all_procs {
+            if ppid == deepest_pid && proc_tty == tty {
+                deepest_pid = pid;
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    let status_path = format!("/proc/{}/status", deepest_pid);
+    fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .map(|uid| uid_map.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn list_all_procs_with_ppid_and_tty() -> Vec<(i32, i32, String)> {
+    let mut result = Vec::new();
+    let Ok(entries) = fs::read_dir("/proc") else { return result; };
+
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else { continue };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else { continue };
+        let Some(rparen) = stat.rfind(')') else { continue };
+        let rest: Vec<&str> = stat[rparen + 2..].split_whitespace().collect();
+        let Some(&tty_nr_str) = rest.get(4) else { continue };
+        let Ok(tty_nr) = tty_nr_str.parse::<i64>() else { continue };
+        if tty_nr == 0 { continue; }
+
+        let tty_name = resolve_tty_name(&entry.path(), major_minor(tty_nr));
+
+        let Ok(status) = fs::read_to_string(entry.path().join("status")) else { continue };
+        let ppid = status
+            .lines()
+            .find(|l| l.starts_with("PPid:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+
+        result.push((pid, ppid, tty_name));
+    }
+    result
 }
 
 fn get_uid_to_username_map() -> HashMap<u32, String> {
