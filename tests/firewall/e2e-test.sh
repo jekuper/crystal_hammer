@@ -20,8 +20,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP_SCRIPT="${SCRIPT_DIR}/cleanup-firewall.sh"
 
-AGENT_BIN="${1:-../../target/debug/agent}"
-CLIENT_BIN="${2:-../../target/debug/client}"
+AGENT_BIN="${1:-${SCRIPT_DIR}/../../target/debug/agent}"
+CLIENT_BIN="${2:-${SCRIPT_DIR}/../../target/debug/client}"
 
 TEST_IFACE_A="cwtest0"
 TEST_IFACE_B="cwtest0-peer"
