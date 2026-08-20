@@ -5,6 +5,24 @@ use ch_common::Result;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use std::fmt::Write as _;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+
+#[derive(Debug, Clone)]
+struct Listener {
+    proto: String,
+    local_ip: String,
+    local_port: u16,
+    inode: u64,
+}
+
+
+
+/// TCP states we consider "listening". UDP has no real state machine over
+/// its socket table, so for UDP we treat *any* bound entry as a "listener"
+/// (there's no LISTEN concept — it's just "something is bound to this port").
+const TCP_LISTEN_STATE: &str = "0A";
 
 pub struct InfoAgentCommand {}
 
@@ -68,194 +86,51 @@ impl InfoAgentCommand {
         format!("eBPF ({}) [System backends present: {}]", mode_str, tools_str)
     }
 
-    use std::collections::HashMap;
-use std::fmt::Write as _;
-use std::fs;
-use std::net::{Ipv4Addr, Ipv6Addr};
-
-#[derive(Debug, Clone)]
-struct Listener {
-    proto: String,
-    local_ip: String,
-    local_port: u16,
-    inode: u64,
-}
-
-/// TCP states we consider "listening". UDP has no real state machine over
-/// its socket table, so for UDP we treat *any* bound entry as a "listener"
-/// (there's no LISTEN concept — it's just "something is bound to this port").
-const TCP_LISTEN_STATE: &str = "0A";
-
-fn parse_listeners_from_file(path: &str, proto: &str, is_v6: bool) -> Vec<Listener> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(), // file missing (e.g. IPv6 disabled) — not fatal
-    };
-
-    let is_udp = proto.starts_with("udp");
-    let mut out = Vec::new();
-
-    // Skip header line
-    for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        // local_address is field[1], state is field[3], inode is field[9]
-        if fields.len() < 10 {
-            continue; // malformed/unexpected line — skip, don't panic
-        }
-
-        let state = fields[3];
-        if !is_udp && state != TCP_LISTEN_STATE {
-            continue; // TCP: only listening sockets
-        }
-
-        let local = fields[1];
-        let Some((ip_hex, port_hex)) = local.split_once(':') else {
-            continue;
-        };
-
-        let Ok(port) = u16::from_str_radix(port_hex, 16) else {
-            continue;
-        };
-
-        let Some(ip_str) = parse_hex_ip(ip_hex, is_v6) else {
-            continue;
-        };
-
-        let Ok(inode) = fields[9].parse::<u64>() else {
-            continue;
-        };
-
-        out.push(Listener {
-            proto: proto.to_string(),
-            local_ip: ip_str,
-            local_port: port,
-            inode,
-        });
-    }
-
-    out
-}
-
-/// Parses the hex-encoded IP from /proc/net/{tcp,udp}[6].
-/// IPv4 fields are 8 hex chars (little-endian 32-bit).
-/// IPv6 fields are 32 hex chars (four little-endian 32-bit words).
-fn parse_hex_ip(hex: &str, is_v6: bool) -> Option<String> {
-    if is_v6 {
-        if hex.len() != 32 {
-            return None;
-        }
-        let mut words = [0u32; 4];
-        for i in 0..4 {
-            words[i] = u32::from_str_radix(&hex[i * 8..i * 8 + 8], 16).ok()?;
-        }
-        let mut bytes = [0u8; 16];
-        for i in 0..4 {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&words[i].to_le_bytes());
-        }
-        let addr = Ipv6Addr::from(bytes);
-        // Normalize dual-stack-mapped v4 addresses for readability
-        if let Some(v4) = addr.to_ipv4_mapped() {
-            Some(v4.to_string())
-        } else {
-            Some(addr.to_string())
-        }
-    } else {
-        if hex.len() != 8 {
-            return None;
-        }
-        let n = u32::from_str_radix(hex, 16).ok()?;
-        Some(Ipv4Addr::from(n.to_le_bytes()).to_string())
-    }
-}
-
-/// Maps socket inode -> (pid, process name). Best-effort: any per-PID
-/// failure (process exited mid-scan, unreadable fd, etc.) is skipped
-/// rather than aborting the whole scan.
-fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
-    let mut map = HashMap::new();
-
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return map, // /proc unreadable — return empty, don't panic
-    };
-
-    for entry in proc_dir.flatten() {
-        let file_name = entry.file_name();
-        let Some(pid_str) = file_name.to_str() else { continue };
-        let Ok(pid) = pid_str.parse::<u32>() else { continue }; // skip non-PID entries
-
-        let fd_dir_path = format!("/proc/{pid}/fd");
-        let Ok(fd_dir) = fs::read_dir(&fd_dir_path) else { continue }; // process gone / no fds
-
-        // Resolve process name once per PID
-        let name = fs::read_to_string(format!("/proc/{pid}/comm"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "-".to_string());
-
-        for fd_entry in fd_dir.flatten() {
-            let path = fd_entry.path();
-            let Ok(target) = fs::read_link(&path) else { continue }; // fd closed mid-scan
-            let Some(target_str) = target.to_str() else { continue };
-
-            if let Some(inode_str) = target_str
-                .strip_prefix("socket:[")
-                .and_then(|s| s.strip_suffix(']'))
-            {
-                if let Ok(inode) = inode_str.parse::<u64>() {
-                    map.insert(inode, (pid, name.clone()));
-                }
-            }
-        }
-    }
-
-    map
-}
-
-fn get_all_listeners(&self) -> String {
-    let mut report = String::with_capacity(4096);
-
-    let _ = writeln!(
-        report,
-        "{:<6} {:<47} {:<10} {:<6} {:<15}",
-        "Proto", "Local Address", "Inode", "PID", "Process"
-    );
-    let _ = writeln!(report, "{}", "-".repeat(90));
-
-    let inode_proc = get_inode_to_process_map();
-
-    let mut listeners = Vec::new();
-    listeners.extend(parse_listeners_from_file("/proc/net/tcp", "tcp", false));
-    listeners.extend(parse_listeners_from_file("/proc/net/tcp6", "tcp6", true));
-    listeners.extend(parse_listeners_from_file("/proc/net/udp", "udp", false));
-    listeners.extend(parse_listeners_from_file("/proc/net/udp6", "udp6", true));
-
-    if listeners.is_empty() {
-        report.push_str("No active listeners found.\n");
-        return report;
-    }
-
-    listeners.sort_by(|a, b| {
-        a.proto
-            .cmp(&b.proto)
-            .then(a.local_port.cmp(&b.local_port))
-    });
-
-    for listener in &listeners {
-        let local_addr = format!("{}:{}", listener.local_ip, listener.local_port);
-        let (pid_str, proc_name) = inode_proc
-            .get(&listener.inode)
-            .map(|(pid, name)| (pid.to_string(), name.clone()))
-            .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    fn get_all_listeners(&self) -> String {
+        let mut report = String::with_capacity(4096);
 
         let _ = writeln!(
             report,
             "{:<6} {:<47} {:<10} {:<6} {:<15}",
-            listener.proto, local_addr, listener.inode, pid_str, proc_name
+            "Proto", "Local Address", "Inode", "PID", "Process"
         );
-    }
+        let _ = writeln!(report, "{}", "-".repeat(90));
 
-    report
-}
+        let inode_proc = get_inode_to_process_map();
+
+        let mut listeners = Vec::new();
+        listeners.extend(parse_listeners_from_file("/proc/net/tcp", "tcp", false));
+        listeners.extend(parse_listeners_from_file("/proc/net/tcp6", "tcp6", true));
+        listeners.extend(parse_listeners_from_file("/proc/net/udp", "udp", false));
+        listeners.extend(parse_listeners_from_file("/proc/net/udp6", "udp6", true));
+
+        if listeners.is_empty() {
+            report.push_str("No active listeners found.\n");
+            return report;
+        }
+
+        listeners.sort_by(|a, b| {
+            a.proto
+                .cmp(&b.proto)
+                .then(a.local_port.cmp(&b.local_port))
+        });
+
+        for listener in &listeners {
+            let local_addr = format!("{}:{}", listener.local_ip, listener.local_port);
+            let (pid_str, proc_name) = inode_proc
+                .get(&listener.inode)
+                .map(|(pid, name)| (pid.to_string(), name.clone()))
+                .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+
+            let _ = writeln!(
+                report,
+                "{:<6} {:<47} {:<10} {:<6} {:<15}",
+                listener.proto, local_addr, listener.inode, pid_str, proc_name
+            );
+        }
+
+        report
+    }
 
     fn get_logged_in_users(&self) -> String {
         let mut report = String::new();
@@ -424,135 +299,93 @@ impl AgentCommand for InfoAgentCommand {
     }
 }
 
-struct ListenerInfo {
-    proto: String,
-    local_ip: String,
-    local_port: u16,
-    inode: u64,
-}
-
-fn parse_ipv4_hex(hex_str: &str) -> Option<std::net::Ipv4Addr> {
-    let val = u32::from_str_radix(hex_str, 16).ok()?;
-    let b1 = (val & 0xFF) as u8;
-    let b2 = ((val >> 8) & 0xFF) as u8;
-    let b3 = ((val >> 16) & 0xFF) as u8;
-    let b4 = ((val >> 24) & 0xFF) as u8;
-    Some(std::net::Ipv4Addr::new(b1, b2, b3, b4))
-}
-
-fn parse_ipv6_hex(hex_str: &str) -> Option<std::net::Ipv6Addr> {
-    if hex_str.len() != 32 {
-        return None;
-    }
-    let mut segments = [0u16; 8];
-    for i in 0..8 {
-        let seg_str = &hex_str[i * 4..(i + 1) * 4];
-        let val = u32::from_str_radix(seg_str, 16).ok()?;
-        segments[i] = (val & 0xFFFF) as u16;
-    }
-    #[cfg(target_endian = "little")]
-    {
-        for seg in segments.iter_mut() {
-            *seg = seg.swap_bytes();
-        }
-    }
-    Some(std::net::Ipv6Addr::new(
-        segments[0], segments[1], segments[2], segments[3],
-        segments[4], segments[5], segments[6], segments[7]
-    ))
-}
-
-fn parse_listeners_from_file(path: &str, proto: &str, is_v6: bool) -> Vec<ListenerInfo> {
-    let mut listeners = Vec::new();
-    let Ok(content) = fs::read_to_string(path) else {
-        return listeners;
+fn parse_listeners_from_file(path: &str, proto: &str, is_v6: bool) -> Vec<Listener> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(), // file missing (e.g. IPv6 disabled) — not fatal
     };
+
+    let is_udp = proto.starts_with("udp");
+    let mut out = Vec::new();
+
+    // Skip header line
     for line in content.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 10 {
-            continue;
-        }
-        let local_addr_part = parts[1];
-        let state_part = parts[3];
-        let inode_part = parts[9];
-
-        if proto.starts_with("tcp") && state_part != "0A" {
-            continue;
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // local_address is field[1], state is field[3], inode is field[9]
+        if fields.len() < 10 {
+            continue; // malformed/unexpected line — skip, don't panic
         }
 
-        let addr_port_parts: Vec<&str> = local_addr_part.split(':').collect();
-        if addr_port_parts.len() != 2 {
-            continue;
+        let state = fields[3];
+        if !is_udp && state != TCP_LISTEN_STATE {
+            continue; // TCP: only listening sockets
         }
-        let ip_hex = addr_port_parts[0];
-        let port_hex = addr_port_parts[1];
+
+        let local = fields[1];
+        let Some((ip_hex, port_hex)) = local.split_once(':') else {
+            continue;
+        };
 
         let Ok(port) = u16::from_str_radix(port_hex, 16) else {
             continue;
         };
-        let Ok(inode) = inode_part.parse::<u64>() else {
+
+        let Some(ip_str) = parse_hex_ip(ip_hex, is_v6) else {
             continue;
         };
 
-        let ip_str = if is_v6 {
-            if let Some(ip) = parse_ipv6_hex(ip_hex) {
-                ip.to_string()
-            } else {
-                continue;
-            }
-        } else {
-            if let Some(ip) = parse_ipv4_hex(ip_hex) {
-                ip.to_string()
-            } else {
-                continue;
-            }
+        let Ok(inode) = fields[9].parse::<u64>() else {
+            continue;
         };
 
-        listeners.push(ListenerInfo {
+        out.push(Listener {
             proto: proto.to_string(),
             local_ip: ip_str,
             local_port: port,
             inode,
         });
     }
-    listeners
+
+    out
 }
 
-fn get_inode_to_process_map() -> HashMap<u64, (i32, String)> {
+fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
     let mut map = HashMap::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return map;
+
+    let proc_dir = match fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(_) => return map, // /proc unreadable — return empty, don't panic
     };
-    for entry in entries {
-        let Ok(entry) = entry else { continue; };
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let Ok(pid) = name_str.parse::<i32>() else {
-            continue;
-        };
-        
-        let comm = fs::read_to_string(path.join("comm"))
+
+    for entry in proc_dir.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid_str) = file_name.to_str() else { continue };
+        let Ok(pid) = pid_str.parse::<u32>() else { continue }; // skip non-PID entries
+
+        let fd_dir_path = format!("/proc/{pid}/fd");
+        let Ok(fd_dir) = fs::read_dir(&fd_dir_path) else { continue }; // process gone / no fds
+
+        // Resolve process name once per PID
+        let name = fs::read_to_string(format!("/proc/{pid}/comm"))
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-            
-        let fd_path = path.join("fd");
-        let Ok(fd_entries) = fs::read_dir(fd_path) else {
-            continue;
-        };
-        for fd_entry in fd_entries {
-            let Ok(fd_entry) = fd_entry else { continue; };
-            if let Ok(link) = fs::read_link(fd_entry.path()) {
-                let link_str = link.to_string_lossy();
-                if link_str.starts_with("socket:[") && link_str.ends_with(']') {
-                    let inode_str = &link_str[8..link_str.len() - 1];
-                    if let Ok(inode) = inode_str.parse::<u64>() {
-                        map.insert(inode, (pid, comm.clone()));
-                    }
+            .unwrap_or_else(|_| "-".to_string());
+
+        for fd_entry in fd_dir.flatten() {
+            let path = fd_entry.path();
+            let Ok(target) = fs::read_link(&path) else { continue }; // fd closed mid-scan
+            let Some(target_str) = target.to_str() else { continue };
+
+            if let Some(inode_str) = target_str
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+            {
+                if let Ok(inode) = inode_str.parse::<u64>() {
+                    map.insert(inode, (pid, name.clone()));
                 }
             }
         }
     }
+
     map
 }
 
@@ -689,6 +522,41 @@ fn get_recent_auth_failures_log() -> Vec<String> {
     }
     failures
 }
+
+
+
+/// Parses the hex-encoded IP from /proc/net/{tcp,udp}[6].
+/// IPv4 fields are 8 hex chars (little-endian 32-bit).
+/// IPv6 fields are 32 hex chars (four little-endian 32-bit words).
+fn parse_hex_ip(hex: &str, is_v6: bool) -> Option<String> {
+    if is_v6 {
+        if hex.len() != 32 {
+            return None;
+        }
+        let mut words = [0u32; 4];
+        for i in 0..4 {
+            words[i] = u32::from_str_radix(&hex[i * 8..i * 8 + 8], 16).ok()?;
+        }
+        let mut bytes = [0u8; 16];
+        for i in 0..4 {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&words[i].to_le_bytes());
+        }
+        let addr = Ipv6Addr::from(bytes);
+        // Normalize dual-stack-mapped v4 addresses for readability
+        if let Some(v4) = addr.to_ipv4_mapped() {
+            Some(v4.to_string())
+        } else {
+            Some(addr.to_string())
+        }
+    } else {
+        if hex.len() != 8 {
+            return None;
+        }
+        let n = u32::from_str_radix(hex, 16).ok()?;
+        Some(Ipv4Addr::from(n.to_le_bytes()).to_string())
+    }
+}
+
 
 pub struct InfoClientCommand {}
 
