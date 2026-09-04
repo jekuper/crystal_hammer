@@ -120,6 +120,14 @@ impl AgentCommand for UploadAgentCommand {
 // CLIENT-SIDE COMMAND (UploadClientCommand)
 // =========================================================================
 
+pub struct UploadClientCommand {}
+
+impl UploadClientCommand {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
 #[async_trait]
 impl ClientCommand for UploadClientCommand {
     fn name(&self) -> &'static str {
