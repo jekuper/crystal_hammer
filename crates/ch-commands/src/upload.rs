@@ -120,14 +120,6 @@ impl AgentCommand for UploadAgentCommand {
 // CLIENT-SIDE COMMAND (UploadClientCommand)
 // =========================================================================
 
-pub struct UploadClientCommand {}
-
-impl UploadClientCommand {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
 #[async_trait]
 impl ClientCommand for UploadClientCommand {
     fn name(&self) -> &'static str {
@@ -194,6 +186,57 @@ impl ClientCommand for UploadClientCommand {
             .await
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
+        // Phase 1.5: Wait for the agent to send the "READY" signal
+        let mut ready = false;
+        let mut agent_responded = false;
+
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Data { ref data } => {
+                    agent_responded = true;
+                    let s = std::str::from_utf8(data).unwrap_or_default();
+                    if s.contains("READY\n") {
+                        ready = true;
+                        // Strip the READY token so it isn't printed to the stdout
+                        let clean = s.replace("READY\n", "");
+                        if !clean.is_empty() {
+                            print!("{}", clean);
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }
+                        break;
+                    } else {
+                        print!("{}", s);
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+                russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                    agent_responded = true;
+                    let s = std::str::from_utf8(data).unwrap_or_default();
+                    eprint!("{}", s);
+                    use std::io::Write;
+                    let _ = std::io::stderr().flush();
+                }
+                russh::ChannelMsg::ExitStatus { exit_status } => {
+                    if exit_status != 0 {
+                        return Err(ch_common::Error::Other(format!(
+                            "Agent exited with status {} before starting transmission",
+                            exit_status
+                        )));
+                    }
+                }
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+
+        if !ready {
+            return Err(ch_common::Error::Other(
+                "Failed to receive READY signal from agent. File transfer aborted.".to_string(),
+            ));
+        }
+
         // Phase 2: Transmit the file content to the remote agent
         let mut transmission_error: Option<String> = None;
         loop {
@@ -220,7 +263,6 @@ impl ClientCommand for UploadClientCommand {
         }
 
         // Phase 3: Output responses and verification results from the remote execution
-        let mut agent_responded = false;
         while let Some(msg) = channel.wait().await {
             match msg {
                 russh::ChannelMsg::Data { ref data } => {
