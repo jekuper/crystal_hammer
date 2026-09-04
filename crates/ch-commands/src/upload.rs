@@ -88,7 +88,7 @@ impl AgentCommand for UploadAgentCommand {
         }
 
         // Calculate final SHA-256 hash
-        let actual_hash = format!("{:x}", hasher.finalize());
+        let actual_hash = hex::encode(hasher.finalize());
 
         // Verify hash integrity
         if actual_hash.eq_ignore_ascii_case(expected_hash) {
@@ -166,7 +166,7 @@ impl ClientCommand for UploadClientCommand {
             }
             hasher.update(&buffer[..n]);
         }
-        let hex_hash = format!("{:x}", hasher.finalize());
+        let hex_hash = hex::encode(hasher.finalize());
 
         // Reset file pointer to the beginning for streaming
         local_file
