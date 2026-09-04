@@ -43,6 +43,13 @@ impl AgentCommand for UploadAgentCommand {
             }
         };
 
+        // Notify the client that we are ready to receive data on stdin
+        if let Err(e) = ctx.stdout.write_all(b"READY\n").await {
+            let _ = tokio::fs::remove_file(dest_path).await;
+            return Err(ch_common::Error::Other(format!("Failed to send ready signal: {}", e)));
+        }
+        let _ = ctx.stdout.flush().await;
+
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 16384];
         let mut bytes_written = 0u64;
@@ -50,7 +57,6 @@ impl AgentCommand for UploadAgentCommand {
 
         // Read stream from client, hash on the fly, and write to disk
         loop {
-            // Assumes ctx.stdin implements tokio::io::AsyncRead
             match ctx.stdin.read(&mut buffer).await {
                 Ok(0) => break, // EOF
                 Ok(n) => {
