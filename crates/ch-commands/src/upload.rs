@@ -50,6 +50,10 @@ impl AgentCommand for UploadAgentCommand {
         }
         let _ = ctx.stdout.flush().await;
 
+        // Remote Diagnostic: Indicate ready state
+        let _ = ctx.stdout.write_all(b"[Agent Debug] READY sent. Waiting to read from stdin...\n").await;
+        let _ = ctx.stdout.flush().await;
+
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 16384];
         let mut bytes_written = 0u64;
@@ -58,8 +62,18 @@ impl AgentCommand for UploadAgentCommand {
         // Read stream from client, hash on the fly, and write to disk
         loop {
             match ctx.stdin.read(&mut buffer).await {
-                Ok(0) => break, // EOF
+                Ok(0) => {
+                    // Remote Diagnostic: EOF hit
+                    let _ = ctx.stdout.write_all(b"[Agent Debug] Stdin returned 0 (EOF reached).\n").await;
+                    let _ = ctx.stdout.flush().await;
+                    break;
+                }
                 Ok(n) => {
+                    // Remote Diagnostic: Data chunk received
+                    let chunk_msg = format!("[Agent Debug] Read {} bytes from stdin.\n", n);
+                    let _ = ctx.stdout.write_all(chunk_msg.as_bytes()).await;
+                    let _ = ctx.stdout.flush().await;
+
                     hasher.update(&buffer[..n]);
                     if !write_failed {
                         if let Err(e) = file.write_all(&buffer[..n]).await {
@@ -79,6 +93,11 @@ impl AgentCommand for UploadAgentCommand {
                 }
             }
         }
+
+        // Remote Diagnostic: Read loop completed
+        let finished_msg = format!("[Agent Debug] Stdin read loop finished. Total bytes written: {}\n", bytes_written);
+        let _ = ctx.stdout.write_all(finished_msg.as_bytes()).await;
+        let _ = ctx.stdout.flush().await;
 
         if write_failed {
             let _ = tokio::fs::remove_file(dest_path).await;
@@ -247,26 +266,44 @@ impl ClientCommand for UploadClientCommand {
 
         // Phase 2: Transmit the file content to the remote agent
         let mut transmission_error: Option<String> = None;
+        let mut total_bytes_sent = 0u64;
+
+        println!("[Client Debug] Starting transmission loop...");
+
         loop {
-            let n = match local_file_transmit.read(&mut buffer).await {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) => {
-                    transmission_error = Some(format!("Failed reading local file: {}", e));
+            match local_file_transmit.read(&mut buffer).await {
+                Ok(0) => {
+                    println!("[Client Debug] Reached EOF of local file (0 bytes read).");
                     break;
                 }
-            };
-            
-            if let Err(e) = channel.data(&buffer[..n]).await {
-                transmission_error = Some(format!("Channel send error: {}", e));
-                break;
+                Ok(n) => {
+                    println!("[Client Debug] Read {} bytes from local file. Writing to channel...", n);
+                    if let Err(e) = channel.data(&buffer[..n]).await {
+                        let err_msg = format!("Channel send error: {}", e);
+                        println!("[Client Debug] Error: {}", err_msg);
+                        transmission_error = Some(err_msg);
+                        break;
+                    }
+                    total_bytes_sent += n as u64;
+                }
+                Err(e) => {
+                    let err_msg = format!("Failed reading local file: {}", e);
+                    println!("[Client Debug] Error: {}", err_msg);
+                    transmission_error = Some(err_msg);
+                    break;
+                }
             }
         }
 
+        println!("[Client Debug] Transmission loop complete. Total bytes sent: {}", total_bytes_sent);
+
         // Notify remote agent that client transmission is finished
         if transmission_error.is_none() {
+            println!("[Client Debug] Sending EOF signal to channel...");
             if let Err(e) = channel.eof().await {
-                transmission_error = Some(format!("Failed sending EOF: {}", e));
+                let err_msg = format!("Failed sending EOF: {}", e);
+                println!("[Client Debug] Error: {}", err_msg);
+                transmission_error = Some(err_msg);
             }
         }
 
@@ -297,8 +334,11 @@ impl ClientCommand for UploadClientCommand {
             }
         }
 
-        // If a transmission error occurred and the agent didn't output any error messages,
-        // return the error back to the shell framework so it gets printed.
+        // If a transmission error occurred, output it locally to standard error
+        if let Some(ref err_msg) = transmission_error {
+            eprintln!("[Client Debug] Warning: A transmission error occurred: {}", err_msg);
+        }
+
         if let Some(err_msg) = transmission_error {
             if !agent_responded {
                 return Err(ch_common::Error::Other(err_msg));
