@@ -190,38 +190,43 @@ impl ClientCommand for UploadClientCommand {
             .map_err(|e| ch_common::Error::Other(e.to_string()))?;
 
         // Phase 2: Transmit the file content to the remote agent
+        let mut transmission_error: Option<String> = None;
         loop {
-            let n = local_file
-                .read(&mut buffer)
-                .await
-                .map_err(|e| ch_common::Error::Other(format!("Failed reading local file: {}", e)))?;
+            let n = match local_file.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    transmission_error = Some(format!("Failed reading local file: {}", e));
+                    break;
+                }
+            };
             
-            if n == 0 {
+            if let Err(e) = channel.data(&buffer[..n]).await {
+                transmission_error = Some(format!("Channel send error: {}", e));
                 break;
             }
-
-            channel
-                .data(&buffer[..n])
-                .await
-                .map_err(|e| ch_common::Error::Other(format!("Failed to transmit data: {}", e)))?;
         }
 
-        // Notify remote agent that client transmission is finished
-        channel
-            .eof()
-            .await
-            .map_err(|e| ch_common::Error::Other(format!("Failed sending EOF: {}", e)))?;
+        // Notify remote agent that client transmission is finished (if we haven't failed yet)
+        if transmission_error.is_none() {
+            if let Err(e) = channel.eof().await {
+                transmission_error = Some(format!("Failed sending EOF: {}", e));
+            }
+        }
 
-        // Output responses and verification results from the remote execution
+        // Phase 3: Output responses and verification results from the remote execution
+        let mut agent_responded = false;
         while let Some(msg) = channel.wait().await {
             match msg {
                 russh::ChannelMsg::Data { ref data } => {
+                    agent_responded = true;
                     let s = std::str::from_utf8(data).unwrap_or_default();
                     print!("{}", s);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
                 russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                    agent_responded = true;
                     let s = std::str::from_utf8(data).unwrap_or_default();
                     eprint!("{}", s);
                     use std::io::Write;
@@ -234,6 +239,16 @@ impl ClientCommand for UploadClientCommand {
                 }
                 russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
                 _ => {}
+            }
+        }
+
+        // If a transmission error occurred and the agent did not send any stdout/stderr output,
+        // return the exact channel/read error back to the shell framework so it gets printed.
+        if let Some(err_msg) = transmission_error {
+            if !agent_responded {
+                return Err(ch_common::Error::Other(err_msg));
+            } else {
+                tracing::debug!("Transmission error occurred but agent responded: {}", err_msg);
             }
         }
 
