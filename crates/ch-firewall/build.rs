@@ -9,6 +9,15 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let ebpf_dir = manifest_dir.join("../ch-firewall-ebpf");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_file = out_dir.join("ch-firewall-ebpf");
+    println!("cargo:rerun-if-env-changed=CH_SKIP_EBPF_BUILD");
+
+    if env::var_os("CH_SKIP_EBPF_BUILD").is_some() {
+        // Placeholder so include_bytes! compiles; only valid for check/clippy.
+        std::fs::write(&out_file, b"").expect("failed to write placeholder");
+        println!("cargo:warning=ch-firewall: eBPF build skipped, binary is NOT usable");
+        return;
+    }
 
     let status = Command::new("cargo")
         .current_dir(&ebpf_dir)

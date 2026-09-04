@@ -333,62 +333,7 @@ async fn run_shell(
             }
         }
     }
-
-    #[cfg(not(unix))]
-    {
-        tracing::warn!("Allocating standard piped shell fallback on non-Unix platform");
-
-        let mut cmd = tokio::process::Command::new("cmd.exe");
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn()?;
-        let mut stdin = child.stdin.take().expect("Failed to open stdin");
-        let mut stdout = child.stdout.take().expect("Failed to open stdout");
-        let mut stderr = child.stderr.take().expect("Failed to open stderr");
-
-        // Process stdout/stderr → SSH channel
-        tokio::spawn(async move {
-            let mut stdout_buf = [0u8; 1024];
-            let mut stderr_buf = [0u8; 1024];
-            loop {
-                tokio::select! {
-                    res = stdout.read(&mut stdout_buf) => match res {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if handle.data(channel_id, russh::CryptoVec::from_slice(&stdout_buf[..n])).await.is_err() {
-                                break;
-                            }
-                        }
-                    },
-                    res = stderr.read(&mut stderr_buf) => match res {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if handle.extended_data(channel_id, 1, russh::CryptoVec::from_slice(&stderr_buf[..n])).await.is_err() {
-                                break;
-                            }
-                        }
-                    },
-                }
-            }
-            let _ = handle.close(channel_id).await;
-        });
-
-        // SSH channel → process stdin
-        loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Data { ref data }) => {
-                    if stdin.write_all(data).await.is_err() {
-                        break;
-                    }
-                }
-                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                _ => {}
-            }
-        }
-    }
-
+    
     Ok(())
 }
 

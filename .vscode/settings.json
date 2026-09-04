@@ -1,0 +1,5 @@
+{
+  "rust-analyzer.cargo.target": "x86_64-unknown-linux-musl",
+  "rust-analyzer.cargo.extraEnv": { "CH_SKIP_EBPF_BUILD": "1" },
+  "rust-analyzer.check.extraEnv": { "CH_SKIP_EBPF_BUILD": "1" }
+}
