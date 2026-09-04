@@ -148,7 +148,7 @@ impl ClientCommand for UploadClientCommand {
         let local_path = &args[0];
         let remote_path = &args[1];
 
-        // Open local file
+        // Open local file for the hashing phase
         let mut local_file = File::open(local_path)
             .await
             .map_err(|e| ch_common::Error::Other(format!("Failed to open local file: {}", e)))?;
@@ -168,11 +168,10 @@ impl ClientCommand for UploadClientCommand {
         }
         let hex_hash = hex::encode(hasher.finalize());
 
-        // Reset file pointer to the beginning for streaming
-        local_file
-            .seek(io::SeekFrom::Start(0))
+        // Reopen the file for the transmission phase to guarantee we start at byte 0
+        let mut local_file_transmit = File::open(local_path)
             .await
-            .map_err(|e| ch_common::Error::Other(format!("Failed seeking local file: {}", e)))?;
+            .map_err(|e| ch_common::Error::Other(format!("Failed to reopen local file for transmission: {}", e)))?;
 
         let session = ctx.session;
         let mut channel = session
@@ -192,7 +191,7 @@ impl ClientCommand for UploadClientCommand {
         // Phase 2: Transmit the file content to the remote agent
         let mut transmission_error: Option<String> = None;
         loop {
-            let n = match local_file.read(&mut buffer).await {
+            let n = match local_file_transmit.read(&mut buffer).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) => {
@@ -207,7 +206,7 @@ impl ClientCommand for UploadClientCommand {
             }
         }
 
-        // Notify remote agent that client transmission is finished (if we haven't failed yet)
+        // Notify remote agent that client transmission is finished
         if transmission_error.is_none() {
             if let Err(e) = channel.eof().await {
                 transmission_error = Some(format!("Failed sending EOF: {}", e));
@@ -242,8 +241,8 @@ impl ClientCommand for UploadClientCommand {
             }
         }
 
-        // If a transmission error occurred and the agent did not send any stdout/stderr output,
-        // return the exact channel/read error back to the shell framework so it gets printed.
+        // If a transmission error occurred and the agent didn't output any error messages,
+        // return the error back to the shell framework so it gets printed.
         if let Some(err_msg) = transmission_error {
             if !agent_responded {
                 return Err(ch_common::Error::Other(err_msg));
