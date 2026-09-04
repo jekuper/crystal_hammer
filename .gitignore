@@ -20,3 +20,5 @@ rustc-ice-*.txt
 
 CLAUDE.local.md
 id_rsa*
+
+token.txt
