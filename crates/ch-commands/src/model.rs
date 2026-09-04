@@ -6,7 +6,7 @@ use ch_transport::client::ClientHandler;
 use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
 
-use crate::{info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}};
+use crate::{info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload::{UploadAgentCommand, UploadClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 
 #[async_trait]
@@ -45,6 +45,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(InfoAgentCommand::new()));
         r.register(Box::new(LockdownAgentCommand::new()));
         r.register(Box::new(UnlockAgentCommand::new()));
+        r.register(Box::new(UploadAgentCommand::new()));
         r
     }
 
@@ -67,6 +68,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(InfoClientCommand::new()));
         r.register(Box::new(LockdownClientCommand::new()));
         r.register(Box::new(UnlockClientCommand::new()));
+        r.register(Box::new(UploadClientCommand::new()));
         r
     }
 

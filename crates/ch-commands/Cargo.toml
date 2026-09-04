@@ -21,4 +21,5 @@ rustyline.workspace = true
 async-trait.workspace = true
 libc.workspace = true
 tabled.workspace = true
+hex.workspace = true
 sha2 = "0.11.0"
