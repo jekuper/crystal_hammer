@@ -27,6 +27,7 @@ use crate::proxy::Hop;
 /// and path autocompletion fallback.
 struct ConsoleHelper {
     commands: Vec<String>,
+    executor: Arc<dyn ClientCommandExecutor>,
     file_completer: FilenameCompleter,
 }
 
@@ -40,29 +41,37 @@ impl Completer for ConsoleHelper {
         line: &str,
         pos: usize,
         ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
-        let line_to_pos = &line[..pos];
-        let trimmed = line_to_pos.trim_start();
-        
-        // If the trimmed portion does not contain any space, we are still 
-        // writing the first word (the command).
-        let is_command = !trimmed.contains(' ');
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let head = &line[..pos];
 
-        if is_command {
-            let start = line_to_pos.len() - trimmed.len();
-            let mut candidates = Vec::new();
-            for cmd in &self.commands {
-                if cmd.starts_with(trimmed) {
-                    candidates.push(Pair {
-                        display: cmd.clone(),
-                        replacement: cmd.clone(),
-                    });
-                }
-            }
-            Ok((start, candidates))
-        } else {
-            self.file_completer.complete(line, pos, ctx)
+        // Start byte of the word under the cursor.
+        let word_start = head.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let word = &head[word_start..];
+
+        // Tokens fully typed before the current word.
+        let prefix: Vec<&str> = head[..word_start].split_whitespace().collect();
+
+        // Case 1: still typing the command name.
+        if prefix.is_empty() {
+            let candidates = self
+                .commands
+                .iter()
+                .filter(|c| c.starts_with(word))
+                .map(|c| Pair {
+                    display: c.to_string(),
+                    replacement: format!("{} ", c),
+                })
+                .collect();
+            return Ok((word_start, candidates));
         }
+
+        // Case 2: command chosen - delegate arg completion to it.
+        if let Some(cmd) = self.commands.iter().find(|c| *c == prefix[0]) {
+            let candidates = self.executor.complete_arg(cmd, &prefix[1..], word, ctx, &self.file_completer);
+            return Ok((word_start, candidates));
+        }
+
+        Ok((word_start, Vec::new()))
     }
 }
 
@@ -124,6 +133,8 @@ pub trait ClientCommandExecutor: Send + Sync {
     fn get_help_for(&self, command_name: &str) -> Option<&str>;
 
     fn get_short_description_for(&self, command_name: &str) -> Option<&str>;
+
+    fn complete_arg(&self, command_name: &str, _preceding_args: &[&str], _word: &str, ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair>;
 }
 
 /// Target address, possibly reached through a proxy chain.
@@ -226,8 +237,11 @@ async fn run_operator_repl(
     command_list.push(String::from("quit"));
     command_list.push(String::from("help"));
 
+    let executor_clone = executor.clone();
+
     rl.set_helper(Some(ConsoleHelper {
         commands: command_list,
+        executor: executor_clone,
         file_completer: FilenameCompleter::new(),
     }));
 

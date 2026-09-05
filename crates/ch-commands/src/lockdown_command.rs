@@ -4,6 +4,8 @@ use ch_common::config::CH_PORT;
 use ch_firewall::loader::Firewall;
 use ch_firewall::loader::Mode;
 use ch_transport::ClientCommandExecutor;
+use rustyline::completion::FilenameCompleter;
+use rustyline::completion::Pair;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
@@ -98,6 +100,60 @@ impl ClientCommand for LockdownClientCommand {
         "Usage: lockdown [ports]\n\n\
         Locks down the agent firewall, allowing only the management port and any additional specified ports.\n\
         Supports nmap-style formatting (e.g., 22,80-90,443)." 
+    }
+
+    fn complete_arg(&self, preceding_args: &[&str], word: &str, _ctx: &rustyline::Context<'_>, _filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        if !preceding_args.is_empty() {
+            return Vec::new();
+        }
+
+        if word.is_empty() {
+            return vec![
+                Pair { display: "<port>       e.g. 8080".to_string(),             replacement: String::new() },
+                Pair { display: "<range>      e.g. 8000-9000".to_string(),        replacement: String::new() },
+                Pair { display: "<list>       e.g. 22,80,443".to_string(),        replacement: String::new() },
+                Pair { display: "<mixed>      e.g. 22,8000-9000,443".to_string(), replacement: String::new() },
+            ];
+        }
+
+        let last_token = word.split(',').last().unwrap_or("");
+
+        if last_token.contains('-') {
+            let mut parts = last_token.split('-');
+            let start_str = parts.next().unwrap_or("");
+            let end_str = parts.next().unwrap_or("");
+
+            match (start_str.parse::<u16>(), end_str) {
+                (Err(_), _) => vec![
+                    Pair { display: format!("{}  -- invalid start port", word), replacement: word.to_string() }
+                ],
+                (Ok(start), "") => vec![
+                    Pair { display: format!("{}  -- e.g. {}-{}", word, start, start.saturating_add(100)), replacement: word.to_string() }
+                ],
+                (Ok(start), end) => match end.parse::<u16>() {
+                    Ok(e) if e < start => vec![
+                        Pair { display: format!("{}  -- end must be >= start ({})", word, start), replacement: word.to_string() }
+                    ],
+                    Ok(_) => vec![
+                        Pair { display: format!("{}  -- valid range", word), replacement: format!("{} ", word) }
+                    ],
+                    Err(_) => vec![
+                        Pair { display: format!("{}  -- invalid end port", word), replacement: word.to_string() }
+                    ],
+                }
+            }
+        } else {
+            match last_token.parse::<u16>() {
+                Ok(_) => vec![
+                    Pair { display: format!("{}   -- confirm", word),          replacement: format!("{} ", word) },
+                    Pair { display: format!("{},  -- add another port/range", word), replacement: format!("{},", word) },
+                ],
+                Err(_) if !last_token.is_empty() => vec![
+                    Pair { display: format!("{}  -- invalid port number", word), replacement: word.to_string() }
+                ],
+                _ => Vec::new(),
+            }
+        }
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {

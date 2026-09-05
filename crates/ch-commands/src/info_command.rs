@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
+use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
@@ -813,6 +814,46 @@ impl ClientCommand for InfoClientCommand {
           users          utmp, loginuids, login shells\n\
           auth           Recent authentication logs\n\
           persistence    Tool persistence self-checks"
+    }
+
+    fn complete_arg(&self, preceding_args: &[&str], word: &str, _ctx: &rustyline::Context<'_>, _filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        const OPTIONS: &[&str] = &["min", "med", "max", "--level"];
+        const SECTIONS: &[&str] = &["host", "firewall", "listeners", "users", "auth", "persistence"];
+        const LEVEL_VALUES: &[&str] = &["min", "med", "max"];
+
+        // If previous token was --level, only complete its value
+        if preceding_args.last() == Some(&"--level") {
+            return LEVEL_VALUES
+                .iter()
+                .filter(|v| v.starts_with(word))
+                .map(|v| Pair { display: v.to_string(), replacement: format!("{} ", v) })
+                .collect();
+        }
+
+        // Don't suggest --level or shorthand options after sections have started,
+        // or if a shorthand (min/med/max) was already used
+        let has_shorthand = preceding_args.iter().any(|a| matches!(*a, "min" | "med" | "max"));
+        let has_level_flag = preceding_args.iter().any(|a| *a == "--level");
+
+        let already_used: std::collections::HashSet<&str> = preceding_args.iter().copied().collect();
+
+        let mut candidates: Vec<&str> = Vec::new();
+
+        // Offer options only if no level has been set yet
+        if !has_shorthand && !has_level_flag {
+            candidates.extend(OPTIONS.iter().copied());
+        }
+
+        // Always offer sections not yet specified
+        candidates.extend(
+            SECTIONS.iter().copied().filter(|s| !already_used.contains(s))
+        );
+
+        candidates
+            .into_iter()
+            .filter(|c| c.starts_with(word))
+            .map(|c| Pair { display: c.to_string(), replacement: format!("{} ", c) })
+            .collect()
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {

@@ -3,6 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ch_transport::{connect, Hop, Target};
+use rustyline::completion::{FilenameCompleter, Pair};
 use std::sync::Arc;
 
 struct LocalExecutor {
@@ -41,6 +42,13 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
         let command = self.registry.find(&command_name)?;
 
         Some(command.help())
+    }
+    
+    fn complete_arg(&self, command_name: &str, preceding_args: &[&str], word: &str, ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        let Some(command) = self.registry.find(&command_name) else {
+            return Vec::new();
+        };
+        command.complete_arg(preceding_args, word, ctx, filename_completer)
     }
 }
 

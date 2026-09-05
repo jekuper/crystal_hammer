@@ -3,6 +3,7 @@ use ch_common::Result;
 use ch_transport::{ClientCommandExecutor, client::ClientHandler};
 use russh::client::Handle;
 use russh::ChannelMsg;
+use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -28,6 +29,10 @@ impl ClientCommand for ShellClientCommand {
         "Usage: shell\n\n\
         Opens a direct interactive shell, ssh like
         "
+    }
+
+    fn complete_arg(&self, _preceding_args: &[&str], _word: &str, _ctx: &rustyline::Context<'_>, _filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        Vec::new()
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], mut ctx: ClientContext<'_>) -> Result<()> {

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -250,6 +251,17 @@ impl ClientCommand for UploadClientCommand {
                         the remote home directory. If it names a directory\n\
                         (ends with '/' or is an existing directory, e.g. '~/'),\n\
                         the local file name is used for the uploaded file."
+    }
+
+    fn complete_arg(&self, preceding_args: &[&str], word: &str, ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        if !preceding_args.is_empty() {
+            return Vec::new();
+        }
+ 
+        match filename_completer.complete(word, word.len(), ctx) {
+            Ok((_pos, pairs)) => pairs,
+            Err(_) => Vec::new(),
+        }
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {

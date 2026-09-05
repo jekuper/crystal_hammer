@@ -3,6 +3,8 @@ use ch_common::Result;
 use ch_firewall::loader::Firewall;
 use ch_firewall::loader::Mode;
 use ch_transport::ClientCommandExecutor;
+use rustyline::completion::FilenameCompleter;
+use rustyline::completion::Pair;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
@@ -51,6 +53,10 @@ impl ClientCommand for UnlockClientCommand {
     fn short_description(&self) -> &'static str { "lifts any firewall blocks" }
     fn help(&self) -> &'static str { 
     "lol" 
+    }
+
+    fn complete_arg(&self, _preceding_args: &[&str], _word: &str, _ctx: &rustyline::Context<'_>, _filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        Vec::new()
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {

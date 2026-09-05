@@ -5,6 +5,7 @@ use ch_common::{Result, proto::CommandEvent};
 use ch_transport::{ClientCommandExecutor, client::ClientHandler};
 use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
+use rustyline::completion::{FilenameCompleter, Pair};
 
 use crate::{help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, shell_command::ShellClientCommand, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
@@ -27,12 +28,17 @@ pub trait ClientCommand: Send + Sync {
     /// Command keyword typed by the operator (e.g. "upload")
     fn name(&self) -> &'static str;
 
+    /// Contains short one line description.
     fn short_description(&self) -> &'static str;
 
+    /// Used when running help command. Contains full multipline description
     fn help(&self) -> &'static str;
     
     /// Execute client-side logic, interacting with the active session
     async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
+
+    /// Used for auto-completion
+    fn complete_arg(&self, _preceding_args: &[&str], _word: &str, ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair>;
 }
 
 pub struct AgentCommandRegistry {
@@ -69,8 +75,8 @@ impl ClientCommandRegistry {
         r.register(Box::new(LockdownClientCommand::new()));
         r.register(Box::new(UnlockClientCommand::new()));
         r.register(Box::new(UploadClientCommand::new()));
-        r.register(Box::new(HelpClientCommand::new()));
         r.register(Box::new(ShellClientCommand::new()));
+        r.register(Box::new(HelpClientCommand::new(r.get_list())));
         r
     }
 

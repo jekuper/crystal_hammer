@@ -1,15 +1,18 @@
 use async_trait::async_trait;
 use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
+use rustyline::completion::{FilenameCompleter, Pair};
 
 use crate::model::{ClientCommand, ClientContext};
 
 
-pub struct HelpClientCommand {}
+pub struct HelpClientCommand {
+    command_names: Vec<String>,
+}
 
 impl HelpClientCommand {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(command_names: Vec<String>) -> Self {
+        Self { command_names }
     }
 }
 
@@ -17,9 +20,26 @@ impl HelpClientCommand {
 impl ClientCommand for HelpClientCommand {
     fn name(&self) -> &'static str { "help" }
     fn short_description(&self) -> &'static str { "Shows help message" }
-    fn help(&self) -> &'static str { 
+    fn help(&self) -> &'static str {
         "Usage: help [command]\n\n\
-        "
+         With no arguments, lists all commands.\n\
+         With a command name, shows its detailed help.\n"
+    }
+
+    fn complete_arg(&self, preceding_args: &[&str], word: &str, _ctx: &rustyline::Context<'_>, _filename_completer: &FilenameCompleter) -> Vec<Pair> {
+        if !preceding_args.is_empty() {
+            // help only takes one argument
+            return Vec::new();
+        }
+
+        self.command_names
+            .iter()
+            .filter(|name| name.starts_with(word))
+            .map(|name| Pair {
+                display: name.clone(),
+                replacement: format!("{} ", name), // trailing space — done after one word
+            })
+            .collect()
     }
 
     async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], _ctx: ClientContext<'_>) -> Result<()> {
