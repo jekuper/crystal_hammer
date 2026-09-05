@@ -4,3 +4,4 @@ pub mod info_command;
 pub mod lockdown_command;
 pub mod unlock_command;
 pub mod upload;
+pub mod help_command;

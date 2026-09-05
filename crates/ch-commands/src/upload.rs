@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use ch_common::Result;
+use ch_transport::ClientCommandExecutor;
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -251,7 +252,7 @@ impl ClientCommand for UploadClientCommand {
                         the local file name is used for the uploaded file."
     }
 
-    async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
         if args.len() < 2 {
             eprintln!("{}", self.help());
             return Ok(());

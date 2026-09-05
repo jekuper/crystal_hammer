@@ -141,6 +141,10 @@ pub trait ClientCommandExecutor: Send + Sync {
     fn get_command_list (
         &self
     ) -> Vec<String>;
+
+    fn get_help_for(&self, command_name: &str) -> Option<&str>;
+
+    fn get_short_description_for(&self, command_name: &str) -> Option<&str>;
 }
 
 /// Target address, possibly reached through a proxy chain.
@@ -297,13 +301,6 @@ async fn run_operator_repl(
                         if let Err(e) = run_interactive_shell(&mut session).await {
                             eprintln!("Shell session error: {:?}", e);
                         }
-                    }
-                    "help" => {
-                        println!("Available commands:");
-                        println!("  shell - Start interactive root shell");
-                        println!("  exit  - Close session and exit client");
-                        println!("  help  - Show this help menu");
-                        let _ = executor.execute("help", args, &mut session).await;
                     }
                     other => {
                         if let Err(e) = executor.execute(other, args, &mut session).await {

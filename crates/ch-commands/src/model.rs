@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ch_common::{Result, proto::CommandEvent};
-use ch_transport::client::ClientHandler;
+use ch_transport::{ClientCommandExecutor, client::ClientHandler};
 use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
 
-use crate::{info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload::{UploadAgentCommand, UploadClientCommand}};
+use crate::{help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload::{UploadAgentCommand, UploadClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 
 #[async_trait]
@@ -32,7 +32,7 @@ pub trait ClientCommand: Send + Sync {
     fn help(&self) -> &'static str;
     
     /// Execute client-side logic, interacting with the active session
-    async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
+    async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
 }
 
 pub struct AgentCommandRegistry {
@@ -69,6 +69,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(LockdownClientCommand::new()));
         r.register(Box::new(UnlockClientCommand::new()));
         r.register(Box::new(UploadClientCommand::new()));
+        r.register(Box::new(HelpClientCommand::new()));
         r
     }
 

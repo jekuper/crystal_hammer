@@ -17,33 +17,9 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
         args: &[String],
         session: &mut russh::client::Handle<ch_transport::client::ClientHandler>,
     ) -> std::result::Result<(), String> {
-        if command == "help" {
-            // If an argument is provided, look up the specific command's help text
-            if let Some(target_command) = args.first() {
-                if let Some(cmd) = self.registry.find(target_command) {
-                    println!("{}", cmd.help());
-                    return Ok(());
-                } else {
-                    return Err(format!("Unknown command: '{}'", target_command));
-                }
-            }
-
-            // Default behavior: list all registered commands
-            println!("Registered commands:");
-            let mut help_summary = "".to_string();
-            for command in self.registry.iter() {
-                help_summary.push_str(command.name());
-                help_summary.push_str(" - ");
-                help_summary.push_str(command.short_description());
-                help_summary.push_str("\n");
-            }
-            println!("{}", help_summary);
-            return Ok(());
-        }
-
         if let Some(cmd) = self.registry.find(command) {
             let ctx = ch_commands::model::ClientContext { session };
-            cmd.execute(args, ctx)
+            cmd.execute(self, args, ctx)
                 .await
                 .map_err(|e| e.to_string())
         } else {
@@ -53,6 +29,18 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
 
     fn get_command_list(&self) -> Vec<String> {
         return self.registry.get_list();
+    }
+
+    fn get_short_description_for(&self, command_name: &str) -> Option<&str> {
+        let command = self.registry.find(&command_name)?;
+
+        Some(command.short_description())
+    }
+
+    fn get_help_for(&self, command_name: &str) -> Option<&str> {
+        let command = self.registry.find(&command_name)?;
+
+        Some(command.help())
     }
 }
 

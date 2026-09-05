@@ -2,6 +2,7 @@ use std::fs;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use ch_common::Result;
+use ch_transport::ClientCommandExecutor;
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
@@ -814,7 +815,7 @@ impl ClientCommand for InfoClientCommand {
           persistence    Tool persistence self-checks"
     }
 
-    async fn execute(&self, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
         let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await
