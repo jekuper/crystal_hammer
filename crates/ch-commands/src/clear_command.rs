@@ -36,8 +36,10 @@ impl ClientCommand for ClearClientCommand {
     }
 
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], _ctx: ClientContext<'_>) -> Result<()> {
-        // ANSI escape sequence: clear screen (\x1B[2J) and move cursor to home position (\x1B[1;1H)
-        print!("\x1B[2J\x1B[1;1H");
+        // \x1B[H  - cursor to home
+        // \x1B[2J - clear visible screen
+        // \x1B[3J - clear scrollback buffer (xterm extension; ignored where unsupported)
+        print!("\x1B[H\x1B[2J\x1B[3J");
         let _ = std::io::stdout().flush();
         Ok(())
     }
