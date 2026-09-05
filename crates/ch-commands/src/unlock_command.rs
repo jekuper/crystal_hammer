@@ -1,8 +1,5 @@
-use std::fs;
-use anyhow::Error;
 use async_trait::async_trait;
 use ch_common::Result;
-use ch_common::config::CH_PORT;
 use ch_firewall::loader::Firewall;
 use ch_firewall::loader::Mode;
 use tokio::io::AsyncWriteExt;
@@ -22,7 +19,7 @@ impl UnlockAgentCommand {
 impl AgentCommand for UnlockAgentCommand {
     fn name(&self) -> &'static str { "unlock" }
 
-    async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, _args: Vec<String>, mut ctx: Context) -> Result<()> {
         Firewall::global()
             .set_mode(Mode::Regular)
             .await

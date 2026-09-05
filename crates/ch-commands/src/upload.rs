@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use ch_common::Result;
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
-use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
 
