@@ -352,6 +352,8 @@ async fn run_exec(
     let command = parts[0].clone();
     let args = parts[1..].to_vec();
 
+    tracing::info!("run_exec ENTRY: command='{}' args={:?}", command, args); // <-- NEW
+
     let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
