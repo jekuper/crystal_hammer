@@ -94,9 +94,8 @@ impl Hinter for ConsoleHelper {
                 .find(|cmd| cmd.starts_with(trimmed) && cmd.len() > trimmed.len())
                 .map(|cmd| cmd[trimmed.len()..].to_string())
         } else {
-            // Reuse the file completer: take its first candidate and show the
-            // part that hasn't been typed yet.
-            let (start, candidates) = self.file_completer.complete(line, pos, ctx).ok()?;
+            // Query the helper's own complete implementation to get the actual command-specific candidates
+            let (start, candidates) = self.complete(line, pos, ctx).ok()?;
             let typed = &line[start..pos];
             candidates
                 .first()
