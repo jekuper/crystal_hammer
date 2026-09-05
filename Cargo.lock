@@ -437,6 +437,7 @@ dependencies = [
  "ch-persistence",
  "ch-store",
  "ch-transport",
+ "crossterm",
  "hex",
  "libc",
  "russh",
