@@ -374,27 +374,31 @@ async fn run_exec(
         }
     });
 
-    // stdin pipe: pump task writes client DATA into the writer;
-    // the executor reads the reader as its stdin. 64 KiB gives backpressure.
+    
     let (stdin_writer, stdin_reader) = tokio::io::duplex(64 * 1024);
 
-    // Pump task owns the channel and keeps draining it. Dropping the writer
-    // (on EOF/Close or when the executor stops reading) signals stdin EOF.
     let stdin_pump = tokio::spawn(async move {
         let mut channel = channel;
         let mut stdin_writer = stdin_writer;
+        let mut total = 0u64;
+        tracing::info!("stdin pump: started, awaiting channel messages");
         loop {
             match channel.wait().await {
                 Some(ChannelMsg::Data { ref data }) => {
+                    total += data.len() as u64;
+                    tracing::info!("stdin pump: Data {} bytes (total {})", data.len(), total);
                     if stdin_writer.write_all(data).await.is_err() {
-                        break; // executor dropped its stdin
+                        tracing::warn!("stdin pump: reader dropped, stopping");
+                        break;
                     }
                 }
-                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                _ => {}
+                Some(ChannelMsg::Eof)   => { tracing::info!("stdin pump: Eof");   break; }
+                Some(ChannelMsg::Close) => { tracing::info!("stdin pump: Close"); break; }
+                None                    => { tracing::info!("stdin pump: None (channel ended)"); break; }
+                Some(_)                 => { tracing::debug!("stdin pump: other msg"); }
             }
         }
-        // stdin_writer dropped here -> EOF to the command's stdin reader
+        tracing::info!("stdin pump: EXIT, delivered {} bytes, dropping writer", total);
     });
 
     let stdin  = Box::new(stdin_reader);
