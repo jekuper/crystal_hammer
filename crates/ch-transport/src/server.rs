@@ -35,6 +35,7 @@ pub trait CommandExecutor: Send + Sync + 'static {
         &self,
         command: String,
         args: Vec<String>,
+        stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         stdout: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
         stderr: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     ) -> std::result::Result<(), String>;
@@ -373,37 +374,49 @@ async fn run_exec(
         }
     });
 
+    // stdin pipe: pump task writes client DATA into the writer;
+    // the executor reads the reader as its stdin. 64 KiB gives backpressure.
+    let (stdin_writer, stdin_reader) = tokio::io::duplex(64 * 1024);
+
+    // Pump task owns the channel and keeps draining it. Dropping the writer
+    // (on EOF/Close or when the executor stops reading) signals stdin EOF.
+    let stdin_pump = tokio::spawn(async move {
+        let mut channel = channel;
+        let mut stdin_writer = stdin_writer;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { ref data }) => {
+                    if stdin_writer.write_all(data).await.is_err() {
+                        break; // executor dropped its stdin
+                    }
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        // stdin_writer dropped here -> EOF to the command's stdin reader
+    });
+
+    let stdin  = Box::new(stdin_reader);
     let stdout = Box::new(ChannelTx { tx: stdout_tx });
     let stderr = Box::new(ChannelTx { tx: stderr_tx });
 
-    let handle_error = handle.clone();
-
-    tokio::spawn(async move {
-        let res = executor.execute(command, args, stdout, stderr).await;
-        
-        match res {
-            Ok(_) => {
-                let _ = handle_error.exit_status_request(channel_id, 0).await;
-            }
-            Err(e) => {
-                let message = format!("Command execution failed: {}\n", e);
-                tracing::error!("{}", message);
-
-                // Write the error message to the remote host's stderr (extended_data with type 1)
-                let _ = handle_error
-                    .extended_data(channel_id, 1, russh::CryptoVec::from_slice(message.as_bytes()))
-                    .await;
-
-                // Send a non-zero exit status (e.g., 1) to indicate failure
-                let _ = handle_error.exit_status_request(channel_id, 1).await;
-            }
+    let res = executor.execute(command, args, stdin, stdout, stderr).await;
+    match res {
+        Ok(_) => { let _ = handle.exit_status_request(channel_id, 0).await; }
+        Err(e) => {
+            let message = format!("Command execution failed: {}\n", e);
+            tracing::error!("{}", message);
+            let _ = handle.extended_data(channel_id, 1,
+                russh::CryptoVec::from_slice(message.as_bytes())).await;
+            let _ = handle.exit_status_request(channel_id, 1).await;
         }
-        let _ = stdout_forwarder.await;
-        let _ = stderr_forwarder.await;
-        let _ = handle.close(channel_id).await;
-        drop(channel); // keep alive until close is confirmed
-    });
+    }
 
+    let _ = stdout_forwarder.await;
+    let _ = stderr_forwarder.await;
+    stdin_pump.abort(); // in case the command finished without consuming all stdin
+    let _ = handle.close(channel_id).await;
     Ok(())
 }
 

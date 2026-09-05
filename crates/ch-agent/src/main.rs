@@ -20,13 +20,14 @@ impl ch_transport::CommandExecutor for AgentExecutor {
         &self,
         command: String,
         args: Vec<String>,
+        stdin: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         stdout: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
         stderr: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     ) -> std::result::Result<(), String> {
         if let Some(cmd) = self.registry.find(&command) {
             let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = ch_commands::model::Context {
-                stdin: Box::new(tokio::io::empty()),
+                stdin,
                 stdout,
                 stderr,
                 events: events_tx,
