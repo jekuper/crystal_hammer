@@ -13,6 +13,8 @@ use std::time::SystemTime;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use std::borrow::Cow;
+
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::highlight::Highlighter;
@@ -118,7 +120,12 @@ impl Hinter for ConsoleHelper {
     }
 }
 
-impl Highlighter for ConsoleHelper {}
+impl Highlighter for ConsoleHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        // Dim gray, reset afterwards
+        Cow::Owned(format!("\x1b[90m{hint}\x1b[0m"))
+    }
+}
 
 impl Validator for ConsoleHelper {}
 
