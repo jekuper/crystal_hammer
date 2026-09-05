@@ -6,7 +6,7 @@ use ch_transport::{ClientCommandExecutor, client::ClientHandler};
 use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
 
-use crate::{help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload::{UploadAgentCommand, UploadClientCommand}};
+use crate::{help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 
 #[async_trait]
