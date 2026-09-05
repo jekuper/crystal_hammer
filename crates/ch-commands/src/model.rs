@@ -80,6 +80,13 @@ impl ClientCommandRegistry {
         self.commands.iter().map(|b| b.as_ref()).find(|c| c.name() == name)
     }
 
+    pub fn get_list(&self) -> Vec<String> {
+        self.commands
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect()
+    }
+
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             inner: self.commands.iter(),

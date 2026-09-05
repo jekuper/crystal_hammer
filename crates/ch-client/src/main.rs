@@ -50,6 +50,10 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
             Err(format!("Unknown command: '{}'", command))
         }
     }
+
+    fn get_command_list(&self) -> Vec<String> {
+        return self.registry.get_list();
+    }
 }
 
 #[derive(Parser, Debug)]

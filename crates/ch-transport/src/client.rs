@@ -14,7 +14,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use rustyline::DefaultEditor;
+use rustyline::completion::{Completer, FilenameCompleter, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::Validator;
+use rustyline::{Context, Helper};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -38,6 +43,85 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Helper structure for rustyline containing both command autocompletion 
+/// and path autocompletion fallback.
+struct ConsoleHelper {
+    commands: Vec<String>,
+    file_completer: FilenameCompleter,
+}
+
+impl Helper for ConsoleHelper {}
+
+impl Completer for ConsoleHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let line_to_pos = &line[..pos];
+        let trimmed = line_to_pos.trim_start();
+        
+        // If the trimmed portion does not contain any space, we are still 
+        // writing the first word (the command).
+        let is_command = !trimmed.contains(' ');
+
+        if is_command {
+            let start = line_to_pos.len() - trimmed.len();
+            let mut candidates = Vec::new();
+            for cmd in &self.commands {
+                if cmd.starts_with(trimmed) {
+                    candidates.push(Pair {
+                        display: cmd.clone(),
+                        replacement: cmd.clone(),
+                    });
+                }
+            }
+            Ok((start, candidates))
+        } else {
+            self.file_completer.complete(line, pos, ctx)
+        }
+    }
+}
+
+impl Hinter for ConsoleHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<Self::Hint> {
+        // Only hint when the cursor is at the end of the line and there's some input.
+        if pos < line.len() || line.trim().is_empty() {
+            return None;
+        }
+
+        let trimmed = line.trim_start();
+        let is_command = !trimmed.contains(' ');
+
+        if is_command {
+            // Suggest the rest of the first command that matches the prefix.
+            self.commands
+                .iter()
+                .find(|cmd| cmd.starts_with(trimmed) && cmd.len() > trimmed.len())
+                .map(|cmd| cmd[trimmed.len()..].to_string())
+        } else {
+            // Reuse the file completer: take its first candidate and show the
+            // part that hasn't been typed yet.
+            let (start, candidates) = self.file_completer.complete(line, pos, ctx).ok()?;
+            let typed = &line[start..pos];
+            candidates
+                .first()
+                .map(|c| c.replacement.as_str())
+                .filter(|r| r.starts_with(typed) && r.len() > typed.len())
+                .map(|r| r[typed.len()..].to_string())
+        }
+    }
+}
+
+impl Highlighter for ConsoleHelper {}
+
+impl Validator for ConsoleHelper {}
+
 /// Dynamic Command Execution abstraction to resolve circular crate dependencies
 #[async_trait]
 pub trait ClientCommandExecutor: Send + Sync {
@@ -47,6 +131,10 @@ pub trait ClientCommandExecutor: Send + Sync {
         args: &[String],
         session: &mut Handle<ClientHandler>,
     ) -> std::result::Result<(), String>;
+
+    fn get_command_list (
+        &self
+    ) -> Vec<String>;
 }
 
 /// Target address, possibly reached through a proxy chain.
@@ -201,7 +289,18 @@ async fn run_operator_repl(
     mut session: Handle<ClientHandler>,
     executor: Arc<dyn ClientCommandExecutor>,
 ) -> anyhow::Result<()> {
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = rustyline::Editor::<ConsoleHelper, DefaultHistory>::new()?;
+
+    let mut command_list = executor.get_command_list();
+    command_list.push(String::from("shell"));
+    command_list.push(String::from("exit"));
+    command_list.push(String::from("quit"));
+    command_list.push(String::from("help"));
+
+    rl.set_helper(Some(ConsoleHelper {
+        commands: command_list,
+        file_completer: FilenameCompleter::new(),
+    }));
 
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
