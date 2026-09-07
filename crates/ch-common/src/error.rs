@@ -21,6 +21,9 @@ pub enum Error {
     #[error("operation not supported on this host: {0}")]
     Unsupported(String),
 
+    #[error("Agent is already running. Pid: {0}\nEnd with 'kill {0}'")]
+    PidLockFailed(u32),
+
     #[error("{0}")]
     AgentCommand(String),
 

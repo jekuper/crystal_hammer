@@ -19,6 +19,7 @@ ch-transport.workspace = true
 ch-persistence.workspace = true
 ch-monitor.workspace = true
 ch-commands.workspace = true
+ch-pid-lock.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

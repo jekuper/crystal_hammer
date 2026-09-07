@@ -12,6 +12,7 @@ members = [
     "crates/ch-agent",
     "crates/ch-client",
     "crates/ch-commands",
+    "crates/ch-pid-lock",
 ]
 
 [workspace.package]
@@ -69,6 +70,7 @@ ch-transport = { path = "crates/ch-transport" }
 ch-persistence = { path = "crates/ch-persistence" }
 ch-monitor = { path = "crates/ch-monitor" }
 ch-commands = { path = "crates/ch-commands" }
+ch-pid-lock = { path = "crates/ch-pid-lock" }
 
 [profile.release]
 # Static IR tool: prefer small, self-contained artifacts.

@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use ch_common::config::CH_PORT;
 use ch_firewall::loader::Firewall;
+use ch_pid_lock::pid_lock::PidGuard;
 use std::sync::Arc;
 
 struct AgentExecutor {
@@ -43,7 +44,27 @@ impl ch_transport::CommandExecutor for AgentExecutor {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<()> {    
+    // Bind the guard to a variable to keep it in scope until main() exits
+    let _guard = match PidGuard::acquire() {
+        Ok(guard) => {
+            // We need to initialize tracing before this if we want to see this log,
+            // but for now we just return the guard from the match arm.
+            guard 
+        },
+        Err(ch_common::Error::PidLockFailed(pid)) => {
+            // We can't use tracing::error here yet because tracing isn't initialized,
+            // so using eprintln is safer for early failures.
+            eprintln!("Agent is already running with PID: {}", pid);
+            std::process::exit(101);
+        },
+        Err(other_error) => {
+            eprintln!("Failed to acquire lock: {:?}", other_error);
+            std::process::exit(102);
+        }
+    };
+
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))

@@ -398,6 +398,7 @@ dependencies = [
  "ch-firewall",
  "ch-monitor",
  "ch-persistence",
+ "ch-pid-lock",
  "ch-sense",
  "ch-spa",
  "ch-store",
@@ -501,6 +502,16 @@ dependencies = [
 
 [[package]]
 name = "ch-persistence"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ch-common",
+ "ch-pid-lock",
+ "tracing",
+]
+
+[[package]]
+name = "ch-pid-lock"
 version = "0.0.1"
 dependencies = [
  "anyhow",

@@ -1,5 +1,5 @@
 [package]
-name = "ch-persistence"
+name = "ch-pid-lock"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,6 +7,5 @@ authors.workspace = true
 
 [dependencies]
 ch-common.workspace = true
-ch-pid-lock.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
