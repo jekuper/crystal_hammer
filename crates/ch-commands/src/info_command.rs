@@ -243,6 +243,10 @@ impl InfoAgentCommand {
         }
 
         let mut rows: Vec<UserRow> = Vec::new();
+        let excluded_shells = vec![
+            "/usr/sbin/nologin",
+            "/bin/false"
+        ];
 
         if let Ok(content) = fs::read_to_string("/etc/passwd") {
             for line in content.lines() {
@@ -255,6 +259,10 @@ impl InfoAgentCommand {
                     };
                     let primary_gid = parts[3];
                     let shell = parts[6];
+
+                    if excluded_shells.contains(&shell) {
+                        continue;
+                    }
 
                     let primary_group = gid_to_name
                         .get(primary_gid)
@@ -313,7 +321,7 @@ impl InfoAgentCommand {
         if report.is_empty() {
             "No registered mechanisms".to_string()
         } else {
-            report.join(", ")
+            report.join("\n")
         }
     }
 }
@@ -435,7 +443,7 @@ impl AgentCommand for InfoAgentCommand {
 
         if show_persistence {
             report.push_str("--- Persistence Health ---\n");
-            report.push_str(&format!("Tool Persistence: {}\n\n", self.get_persistence_health()));
+            report.push_str(&format!("Tool Persistence:\n{}\n\n", self.get_persistence_health()));
         }
 
         ctx.stdout.write_all(report.as_bytes()).await?;
