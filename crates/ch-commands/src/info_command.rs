@@ -295,7 +295,26 @@ impl InfoAgentCommand {
     }
 
     fn get_persistence_health(&self) -> String {
-        return "Not Implemented!".to_string();
+        let registry = ch_persistence::Registry::with_builtins();
+        let mut report = Vec::new();
+        for m in registry.all() {
+            let status = if !m.available() {
+                "Unavailable".to_string()
+            } else {
+                match m.check() {
+                    Ok(ch_persistence::Health::Active) => "Active".to_string(),
+                    Ok(ch_persistence::Health::Degraded) => "Degraded".to_string(),
+                    Ok(ch_persistence::Health::Missing) => "Missing".to_string(),
+                    Err(e) => format!("Error ({})", e),
+                }
+            };
+            report.push(format!("{}: {}", m.id(), status));
+        }
+        if report.is_empty() {
+            "No registered mechanisms".to_string()
+        } else {
+            report.join(", ")
+        }
     }
 }
 
