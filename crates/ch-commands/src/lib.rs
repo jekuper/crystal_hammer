@@ -7,3 +7,4 @@ pub mod upload_command;
 pub mod help_command;
 pub mod shell_command;
 pub mod clear_command;
+pub mod restart_command;
