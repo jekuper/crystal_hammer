@@ -83,7 +83,17 @@ async fn main() -> Result<()> {
         .context("No embedded public key found in agent binary")?;
 
     tracing::info!("Loading persistence mechanisms...");
-    let _persistence = ch_persistence::Registry::with_builtins();
+    let persistence = ch_persistence::Registry::with_builtins();
+
+    match std::env::current_exe() {
+        Ok(exe_path) => {
+            let installed_list = persistence.install_all(&exe_path);
+            tracing::info!("{}", installed_list.join(", "));
+        }
+        Err(e) => {
+            tracing::error!("Failed to get current executable path. Persistence won't be installed: {}", e);
+        }
+    }
     
     tracing::info!("Loading monitor checks...");
     let _checks = ch_monitor::Registry::with_builtins();
