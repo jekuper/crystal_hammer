@@ -243,9 +243,11 @@ impl InfoAgentCommand {
         }
 
         let mut rows: Vec<UserRow> = Vec::new();
-        let excluded_shells = vec![
+        let excluded_shells = [
             "/usr/sbin/nologin",
-            "/bin/false"
+            "/sbin/nologin",
+            "/bin/false",
+            "/usr/bin/false",
         ];
 
         if let Ok(content) = fs::read_to_string("/etc/passwd") {
