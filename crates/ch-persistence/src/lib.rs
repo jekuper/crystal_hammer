@@ -67,6 +67,18 @@ impl Registry {
         done
     }
 
+    pub fn install_first_successful(&self, self_path: &std::path::Path) -> Option<ch_common::ImplId> {
+        for m in &self.mechanisms {
+            if m.available() {
+                match m.install(self_path) {
+                    Ok(()) => return Some(m.id()),
+                    Err(e) => tracing::warn!(mechanism = m.id(), error = %e, "install failed, trying next fallback"),
+                }
+            }
+        }
+        None
+    }
+
     pub fn all(&self) -> impl Iterator<Item = &dyn Mechanism> {
         self.mechanisms.iter().map(|m| m.as_ref())
     }

