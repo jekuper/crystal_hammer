@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use ch_common::Result;
 
 /// Canonical PID/lock file. The daemon takes an exclusive `flock` on it at

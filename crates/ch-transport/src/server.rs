@@ -67,6 +67,11 @@ async fn accept_tcp(
         let executor_clone = executor.clone();
 
         tokio::spawn(async move {
+            #[cfg(unix)]
+            if let Err(e) = crate::set_tcp_keepalive(&stream) {
+                tracing::warn!("Failed to set TCP keepalive for client connection from {}: {:?}", src, e);
+            }
+            
             let mut buf = [0u8; 94];
             if let Err(e) = stream.read_exact(&mut buf).await {
                 tracing::debug!("Aborted or quiet connection from {}: {:?}", src, e);

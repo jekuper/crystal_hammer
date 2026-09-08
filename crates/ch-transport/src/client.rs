@@ -189,6 +189,11 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
         connect_via_proxy_chain(via, target, &keypair).await?
     };
 
+    #[cfg(unix)]
+    if let Err(e) = crate::set_tcp_keepalive(&stream) {
+        tracing::warn!("Failed to set TCP keepalive: {:?}", e);
+    }
+
     tracing::info!("Connection established, transitioning stream to russh");
 
     let config = Arc::new(russh::client::Config::default());
@@ -277,6 +282,10 @@ async fn run_operator_repl(
                     other => {
                         if let Err(e) = executor.execute(other, args, &mut session).await {
                             eprintln!("Error: {}", e);
+                            let err_str = e.to_string();
+                            if err_str.contains("Channel send error") || err_str.contains("not connected") {
+                                eprintln!("Connection to agent appears to be lost. Please exit and reconnect.");
+                            }
                         }
                     }
                 }

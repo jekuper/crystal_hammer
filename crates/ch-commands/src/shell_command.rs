@@ -38,7 +38,8 @@ impl ClientCommand for ShellClientCommand {
     async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], mut ctx: ClientContext<'_>) -> Result<()> {
         println!("Spawning interactive shell. Type 'exit' to return to console.");
         if let Err(e) = run_interactive_shell(&mut ctx.session).await {
-            eprintln!("Shell session error: {:?}", e);
+            eprintln!("Shell session error: {}", e);
+            eprintln!("If the session was idle, the connection may have been closed by the server or a firewall.");
         }
 
         Ok(())
@@ -84,19 +85,28 @@ async fn run_interactive_shell(session: &mut Handle<ClientHandler>) -> anyhow::R
     let mut channel = session
         .channel_open_session()
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            format!("Failed to open SSH channel (the connection may have been lost): {}", e)
+        ))?;
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
     channel
         .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            format!("PTY request failed (the connection may have been lost): {}", e)
+        ))?;
 
     channel
         .request_shell(true)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            format!("Shell request failed (the connection may have been lost): {}", e)
+        ))?;
 
     tracing::info!("Interactive PTY shell allocated");
 
