@@ -142,6 +142,6 @@ pub struct AgentCommandContext {
     /// Access to persistent key-value store (redb wrapper)
     pub store: Arc<ch_store::Store>,
 
-    pub command_registry: Arc<ch_persistence::Registry>,
+    pub command_registry: Arc<AgentCommandRegistry>,
     pub persistence_registry: Arc<ch_persistence::Registry>,
 }

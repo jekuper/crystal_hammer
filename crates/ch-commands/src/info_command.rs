@@ -304,8 +304,8 @@ impl InfoAgentCommand {
         failures.join("\n")
     }
 
-    fn get_persistence_health(&self) -> String {
-        let registry = ch_persistence::Registry::with_builtins();
+    fn get_persistence_health(&self, ctx: &AgentCommandContext) -> String {
+        let registry = &ctx.persistence_registry;
         let mut report = Vec::new();
         for m in registry.all() {
             let status = if !m.available() {
@@ -445,7 +445,7 @@ impl AgentCommand for InfoAgentCommand {
 
         if show_persistence {
             report.push_str("--- Persistence Health ---\n");
-            report.push_str(&format!("Tool Persistence:\n{}\n\n", self.get_persistence_health()));
+            report.push_str(&format!("Tool Persistence:\n{}\n\n", self.get_persistence_health(&ctx)));
         }
 
         ctx.stdout.write_all(report.as_bytes()).await?;

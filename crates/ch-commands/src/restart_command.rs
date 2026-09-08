@@ -16,8 +16,8 @@ impl RestartAgentCommand {
         Self {}
     }
 
-    fn has_healthy_persistence(&self) -> bool {
-        let registry = ch_persistence::Registry::with_builtins();
+    fn has_healthy_persistence(&self, ctx: &AgentCommandContext) -> bool {
+        let registry = &ctx.persistence_registry;
         for m in registry.all() {
             if m.available() {
                 if let Ok(ch_persistence::Health::Active) = m.check() {
@@ -38,7 +38,7 @@ impl AgentCommand for RestartAgentCommand {
     async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         let force = args.iter().any(|arg| arg == "--force" || arg == "-f");
 
-        if !self.has_healthy_persistence() && !force {
+        if !self.has_healthy_persistence(&ctx) && !force {
             let warn_msg = "Warning: No healthy/active persistence mechanisms detected!\n\
                             Restarting now might lock you out of the machine if the agent does not auto-start.\n\
                             If you are sure, run: restart --force\n";
