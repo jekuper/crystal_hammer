@@ -9,3 +9,4 @@ authors.workspace = true
 ch-common.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+libc.workspace = true

@@ -27,6 +27,9 @@ pub enum Error {
     #[error("{0}")]
     AgentCommand(String),
 
+    #[error("This operation requires root: {0}")]
+    MissingRoot(String),
+
     #[error("{0}")]
     Other(String),
 }

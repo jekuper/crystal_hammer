@@ -1,22 +1,29 @@
-
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use ch_common::Result;
 
-/// Canonical PID file. The daemon writes it on startup; the cron watchdog reads
-/// it. Kept under /run (tmpfs) so a stale file never survives a reboot.
+/// Canonical PID/lock file. The daemon takes an exclusive `flock` on it at
+/// startup and writes its PID into it; the cron watchdog reads that PID. Kept
+/// under /run (tmpfs, node-local) so a stale file never survives a reboot and
+/// so `flock` behaves - unlike some network filesystems, tmpfs locks are real.
 pub const PID_FILE: &str = "/run/ch.pid";
 
+// ---- PID lock --------------------------------------------------------------
 
-// ---- PID file --------------------------------------------------------------
-
-/// Ownership record for the running daemon. Call `PidGuard::acquire()` once,
-/// early in the daemon's `main()`. Holding the returned guard keeps the PID
-/// file present; dropping it (clean exit) removes the file, but only if it
-/// still names us - a crashed process leaves a stale file that the watchdog
-/// treats as "dead" on the next tick.
+/// Exclusive run-lock for the daemon. Call `PidGuard::acquire()` once, early in
+/// `main()`, and keep the returned guard alive for the life of the process.
+///
+/// The lock lives on the open file descriptor held inside the guard. The kernel
+/// releases it the instant that fd closes - on drop, on a clean exit, or on a
+/// crash - so there is no stale-lock state to reason about and no liveness
+/// guessing. That is the whole reason this uses `flock` instead of a
+/// check-then-write on the file contents: the old scheme had a window where two
+/// processes could both read "no live owner" and both claim the file.
 pub struct PidGuard {
-    path: PathBuf,
+    // Holding this open keeps the flock held. Never closed early.
+    _file: File,
     pid: u32,
 }
 
@@ -28,48 +35,70 @@ impl PidGuard {
     pub fn acquire_at(path: &Path) -> Result<Self> {
         let me = std::process::id();
 
-        // Refuse to start a second instance while a live one owns the file.
-        if let Some(existing) = read_pid(path) {
-            if existing != me && pid_is_alive(existing) {
-                return Err(
-                    ch_common::Error::PidLockFailed(existing)
-                );
-            }
-            // else: file is stale (dead pid) or already ours - take it over.
-        }
-
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
 
-        // Write atomically: write a temp file, then rename over the target so a
-        // concurrent reader never sees a half-written PID.
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("pidfile");
-        let tmp = path.with_file_name(format!(".{name}.{me}.tmp"));
-        fs::write(&tmp, format!("{me}\n"))?;
-        fs::rename(&tmp, path)?;
+        // Open (creating if absent) WITHOUT truncating: if we lose the race for
+        // the lock we still want to read the current owner's PID for the error
+        // message. Truncation happens only after we've won the lock.
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
 
-        Ok(PidGuard {
-            path: path.to_path_buf(),
-            pid: me,
-        })
-    }
-}
-
-impl Drop for PidGuard {
-    fn drop(&mut self) {
-        // Never clobber a successor's file: only remove if it still names us.
-        if read_pid(&self.path) == Some(self.pid) {
-            let _ = fs::remove_file(&self.path);
+        // Atomically claim ownership. LOCK_EX | LOCK_NB either grabs the
+        // exclusive lock right now or fails immediately with EWOULDBLOCK; it
+        // never blocks and, crucially, never races - the kernel guarantees at
+        // most one holder. This is the fix for the old check-then-write TOCTOU
+        // window, so two supervisors (cron + systemd) firing at once can no
+        // longer both start a daemon.
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                // Interrupted by a signal before the lock resolved - just retry.
+                Some(libc::EINTR) => continue,
+                // Someone else holds the lock. Read their PID purely for the
+                // error message; correctness came from the failed lock, not
+                // from this read (which may briefly race the owner's write).
+                Some(libc::EWOULDBLOCK) => {
+                    let owner = read_pid(path).unwrap_or(0);
+                    return Err(ch_common::Error::PidLockFailed(owner));
+                }
+                _ => return Err(err.into()),
+            }
         }
+
+        // We own the lock. Publish our PID for the watchdog. Truncate first so a
+        // shorter PID can't leave trailing bytes from a previous, longer owner.
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        writeln!(file, "{me}")?;
+        file.flush()?;
+
+        Ok(PidGuard { _file: file, pid: me })
+    }
+
+    /// Our PID, i.e. the value written into the lock file.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 }
+
+// No `Drop` impl is needed to release the lock: dropping `_file` closes the fd,
+// which drops the flock. We deliberately do NOT unlink the file. Unlinking a
+// flock'd path is racy (a concurrent opener can end up locking an inode whose
+// name is already gone, while a fresh create makes a different inode), and it
+// buys nothing here: on exit the file is simply left holding our now-dead PID,
+// which the cron watchdog treats as "not running" via `kill -0` and relaunches.
+// Any reader of this file must pair it with a liveness check; it is a hint for
+// the watchdog, not proof of a live process.
 
 fn read_pid(path: &Path) -> Option<u32> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-/// Liveness check via /proc (Linux). Consistent with the watchdog's `kill -0`.
-fn pid_is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
 }
