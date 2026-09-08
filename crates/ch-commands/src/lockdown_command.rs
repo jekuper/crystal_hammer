@@ -8,7 +8,7 @@ use rustyline::completion::FilenameCompleter;
 use rustyline::completion::Pair;
 use tokio::io::AsyncWriteExt;
 
-use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientCommandContext, AgentCommandContext};
 
 /// Parses port specifications similar to nmap.
 /// Supports formats like: "80", "80,443", "8000-8100", or combinations "22,80-90,443".
@@ -56,7 +56,7 @@ impl LockdownAgentCommand {
 impl AgentCommand for LockdownAgentCommand {
     fn name(&self) -> &'static str { "lockdown" }
 
-    async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         let additional_ports = parse_ports(&args)
             .map_err(|e| ch_common::Error::AgentCommand(format!("Port parsing error: {e}")))?;
 
@@ -156,7 +156,7 @@ impl ClientCommand for LockdownClientCommand {
         }
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
         let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await

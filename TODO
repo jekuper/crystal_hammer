@@ -1,4 +1,1 @@
-restart command - kills the app. doesn't kill the app and prints warning (unless force argument present) if none of persistence is installed and healthy
-info command should report persistence accurately
 new command - persistence [info/install/uninstall] [target/all] - will try to install or uninstall or give info on installed (such as where the config is, or what the service name is. each provider has its own method).
-in install_all instead of installing all, it should install first that successfull in order of the registry. so systemd should go first, then cron for now. rename the install_all method or create a new one and use that.

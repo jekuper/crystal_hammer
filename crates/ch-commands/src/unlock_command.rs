@@ -7,7 +7,7 @@ use rustyline::completion::FilenameCompleter;
 use rustyline::completion::Pair;
 use tokio::io::AsyncWriteExt;
 
-use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientCommandContext, AgentCommandContext};
 
 pub struct UnlockAgentCommand {}
 
@@ -22,7 +22,7 @@ impl UnlockAgentCommand {
 impl AgentCommand for UnlockAgentCommand {
     fn name(&self) -> &'static str { "unlock" }
 
-    async fn execute(&self, _args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, _args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         Firewall::global()
             .set_mode(Mode::Regular)
             .await
@@ -59,7 +59,7 @@ impl ClientCommand for UnlockClientCommand {
         Vec::new()
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
         let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await

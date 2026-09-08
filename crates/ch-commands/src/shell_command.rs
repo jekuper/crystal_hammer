@@ -10,7 +10,7 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 
-use crate::model::{ClientCommand, ClientContext};
+use crate::model::{ClientCommand, ClientCommandContext};
 
 
 pub struct ShellClientCommand {}
@@ -35,7 +35,7 @@ impl ClientCommand for ShellClientCommand {
         Vec::new()
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], mut ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], mut ctx: ClientCommandContext<'_>) -> Result<()> {
         println!("Spawning interactive shell. Type 'exit' to return to console.");
         if let Err(e) = run_interactive_shell(&mut ctx.session).await {
             eprintln!("Shell session error: {}", e);

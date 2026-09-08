@@ -6,7 +6,7 @@ use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 use std::io::Write;
 
-use crate::model::{ClientCommand, ClientContext};
+use crate::model::{ClientCommand, ClientCommandContext};
 
 pub struct ClearClientCommand {}
 
@@ -35,7 +35,7 @@ impl ClientCommand for ClearClientCommand {
         Vec::new()
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], _ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, _args: &[String], _ctx: ClientCommandContext<'_>) -> Result<()> {
         // \x1B[H  - cursor to home
         // \x1B[2J - clear visible screen
         // \x1B[3J - clear scrollback buffer (xterm extension; ignored where unsupported)

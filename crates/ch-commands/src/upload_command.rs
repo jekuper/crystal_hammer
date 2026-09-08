@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientCommandContext, AgentCommandContext};
 
 // =========================================================================
 // AGENT-SIDE COMMAND (UploadAgentCommand)
@@ -98,7 +98,7 @@ impl AgentCommand for UploadAgentCommand {
         "upload"
     }
 
-    async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         if args.len() < 2 {
             let _ = ctx.stdout.write_all(b"Error: Missing destination path or expected hash\n").await;
             return Ok(());
@@ -264,7 +264,7 @@ impl ClientCommand for UploadClientCommand {
         }
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
         if args.len() < 2 {
             eprintln!("{}", self.help());
             return Ok(());

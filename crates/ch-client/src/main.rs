@@ -19,7 +19,7 @@ impl ch_transport::ClientCommandExecutor for LocalExecutor {
         session: &mut russh::client::Handle<ch_transport::client::ClientHandler>,
     ) -> std::result::Result<(), String> {
         if let Some(cmd) = self.registry.find(command) {
-            let ctx = ch_commands::model::ClientContext { session };
+            let ctx = ch_commands::model::ClientCommandContext { session };
             cmd.execute(self, args, ctx)
                 .await
                 .map_err(|e| e.to_string())

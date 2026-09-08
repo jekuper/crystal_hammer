@@ -27,7 +27,7 @@ impl ch_transport::CommandExecutor for AgentExecutor {
     ) -> std::result::Result<(), String> {
         if let Some(cmd) = self.registry.find(&command) {
             let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
-            let ctx = ch_commands::model::Context {
+            let ctx = ch_commands::model::AgentCommandContext {
                 stdin,
                 stdout,
                 stderr,

@@ -6,7 +6,7 @@ use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 
-use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientCommandContext, AgentCommandContext};
 use std::fmt::Write as _;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
@@ -332,7 +332,7 @@ impl InfoAgentCommand {
 impl AgentCommand for InfoAgentCommand {
     fn name(&self) -> &'static str { "info" }
 
-    async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         let mut level = "max";
         let mut show_host = false;
         let mut show_firewall = false;
@@ -885,7 +885,7 @@ impl ClientCommand for InfoClientCommand {
             .collect()
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
         let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await

@@ -16,10 +16,10 @@ pub trait AgentCommand: Send + Sync {
     fn name(&self) -> &'static str;
     
     /// Execute the command within the provided context
-    async fn execute(&self, args: Vec<String>, ctx: Context) -> Result<()>;
+    async fn execute(&self, args: Vec<String>, ctx: AgentCommandContext) -> Result<()>;
 }
 
-pub struct ClientContext<'a> {
+pub struct ClientCommandContext<'a> {
     pub session: &'a mut Handle<ClientHandler>,
 }
 
@@ -35,7 +35,7 @@ pub trait ClientCommand: Send + Sync {
     fn help(&self) -> &'static str;
     
     /// Execute client-side logic, interacting with the active session
-    async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()>;
+    async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()>;
 
     /// Used for auto-completion
     fn complete_arg(&self, _preceding_args: &[&str], _word: &str, ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair>;
@@ -130,7 +130,7 @@ impl<'a> IntoIterator for &'a ClientCommandRegistry {
     }
 }
 
-pub struct Context {
+pub struct AgentCommandContext {
     /// Inbound stream from the client (for script inputs or file uploads)
     pub stdin: Box<dyn AsyncRead + Send + Unpin>,
     /// Real-time stdout stream
@@ -141,4 +141,7 @@ pub struct Context {
     pub events: mpsc::UnboundedSender<CommandEvent>,
     /// Access to persistent key-value store (redb wrapper)
     pub store: Arc<ch_store::Store>,
+
+    pub command_registry: Arc<ch_persistence::Registry>,
+    pub persistence_registry: Arc<ch_persistence::Registry>,
 }

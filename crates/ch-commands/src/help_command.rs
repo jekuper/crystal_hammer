@@ -3,7 +3,7 @@ use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 
-use crate::model::{ClientCommand, ClientContext};
+use crate::model::{ClientCommand, ClientCommandContext};
 
 
 pub struct HelpClientCommand {
@@ -42,7 +42,7 @@ impl ClientCommand for HelpClientCommand {
             .collect()
     }
 
-    async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], _ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, executor: &dyn ClientCommandExecutor, args: &[String], _ctx: ClientCommandContext<'_>) -> Result<()> {
         let command_list = executor.get_command_list();
 
         // If an argument is provided, look up the specific command's help text

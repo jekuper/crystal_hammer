@@ -7,7 +7,7 @@ use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 use std::time::Duration;
 
-use crate::model::{AgentCommand, ClientCommand, ClientContext, Context};
+use crate::model::{AgentCommand, ClientCommand, ClientCommandContext, AgentCommandContext};
 
 pub struct RestartAgentCommand {}
 
@@ -35,7 +35,7 @@ impl AgentCommand for RestartAgentCommand {
         "restart"
     }
 
-    async fn execute(&self, args: Vec<String>, mut ctx: Context) -> Result<()> {
+    async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         let force = args.iter().any(|arg| arg == "--force" || arg == "-f");
 
         if !self.has_healthy_persistence() && !force {
@@ -97,7 +97,7 @@ impl ClientCommand for RestartClientCommand {
             .collect()
     }
 
-    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientContext<'_>) -> Result<()> {
+    async fn execute(&self, _executor: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
         let session = ctx.session;
         let mut channel = session.channel_open_session()
             .await
