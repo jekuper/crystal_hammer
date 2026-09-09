@@ -33,6 +33,9 @@ pub trait Mechanism: Send + Sync {
 
     /// Remove this mechanism (teardown).
     fn remove(&self) -> Result<()>;
+
+    /// Detailed metadata or current configuration specifics of this provider.
+    fn info(&self) -> String;
 }
 
 pub struct Registry {

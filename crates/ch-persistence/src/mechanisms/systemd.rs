@@ -125,6 +125,29 @@ impl Mechanism for Systemd {
         }
         Ok(())
     }
+    fn info(&self) -> String {
+        // We re-use the logic from check() to see if we are currently "Enabled"
+        let is_enabled = match self.check() {
+            Ok(Health::Active) => "Yes",
+            _ => "No",
+        };
+
+        let mut base = format!(
+            "Available: {}\nEnabled: {}\n",
+            if self.available() { "Yes" } else { "No" },
+            is_enabled
+        );
+
+        // If it's not enabled, we hide the implementation details
+        if is_enabled == "Yes" {
+            base.push_str(&format!(
+                "Service Name: {}\nUnit Path: {}/{}\nTarget Hook: {}\nRestart Interval: {}s",
+                SERVICE_NAME, UNIT_DIR, SERVICE_NAME, WANTED_BY, RESTART_SEC
+            ));
+        }
+        
+        base
+    }
 }
 
 // ---- systemctl I/O ---------------------------------------------------------

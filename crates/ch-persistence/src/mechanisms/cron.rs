@@ -120,6 +120,30 @@ impl Mechanism for Cron {
             write_crontab(&bin, &stripped)
         }
     }
+
+    fn info(&self) -> String {
+        // We re-use the logic from check() to see if we are currently "Enabled"
+        let is_enabled = match self.check() {
+            Ok(Health::Active) => "Yes",
+            _ => "No",
+        };
+
+        let mut base = format!(
+            "Available: {}\nEnabled: {}\n",
+            if self.available() { "Yes" } else { "No" },
+            is_enabled
+        );
+
+        // If it's not enabled, we hide the implementation details
+        if is_enabled == "Yes" {
+            base.push_str(&format!(
+                "Schedule: {}\nPID File: {}\nMarker Begin: {}\nMarker End: {}",
+                RESPAWN_SCHEDULE, PID_FILE, MARKER_BEGIN, MARKER_END
+            ));
+        }
+        
+        base
+    }
 }
 
 // ---- crontab I/O -----------------------------------------------------------
