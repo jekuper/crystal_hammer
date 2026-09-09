@@ -7,7 +7,7 @@ use russh::client::Handle;
 use tokio::{io::{AsyncRead, AsyncWrite}, sync::mpsc};
 use rustyline::completion::{FilenameCompleter, Pair};
 
-use crate::{clear_command::ClearClientCommand, help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, restart_command::{RestartAgentCommand, RestartClientCommand}, shell_command::ShellClientCommand, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}};
+use crate::{clear_command::ClearClientCommand, help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, persistence_command::{PersistenceAgentCommand, PersistenceClientCommand}, restart_command::{RestartAgentCommand, RestartClientCommand}, shell_command::ShellClientCommand, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 
 #[async_trait]
@@ -53,6 +53,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(UnlockAgentCommand::new()));
         r.register(Box::new(UploadAgentCommand::new()));
         r.register(Box::new(RestartAgentCommand::new()));
+        r.register(Box::new(PersistenceAgentCommand::new()));
         r
     }
 
@@ -79,8 +80,9 @@ impl ClientCommandRegistry {
         r.register(Box::new(ShellClientCommand::new()));
         r.register(Box::new(ClearClientCommand::new()));
         r.register(Box::new(RestartClientCommand::new()));
+        r.register(Box::new(PersistenceClientCommand::new()));
 
-        //have to last!
+        //has to be last!
         r.register(Box::new(HelpClientCommand::new(r.get_list())));
         r
     }
