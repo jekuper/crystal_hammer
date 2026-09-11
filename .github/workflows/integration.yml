@@ -29,6 +29,15 @@ jobs:
       - name: Mount BPF filesystem
         run: sudo mount -t bpf none /sys/fs/bpf || true
 
+      - name: Generate Team Keypair for CI
+        run: |
+          if [ ! -f id_rsa ]; then
+            ssh-keygen -t ed25519 -N "" -f id_rsa -C "ci-test-key"
+          fi
+
+      - name: Build Crystal Hammer Binaries
+        run: make build-all
+
       - name: Build Crystal Hammer Binaries
         run: make build-all
 
