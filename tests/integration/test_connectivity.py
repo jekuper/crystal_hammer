@@ -57,19 +57,23 @@ def test_agent_connectivity(docker_client, build_binaries, image):
         # 1. Drop the agent into the container
         copy_executable_to_container(container, build_binaries["agent"], "/usr/local/bin", "ch-agent")
 
-        # 2. Run the agent in the background
-        container.exec_run("/usr/local/bin/ch-agent", detach=True)
+        # 2. Run the agent in the background, capturing its output to a file
+        container.exec_run(
+            "sh -c '/usr/local/bin/ch-agent > /tmp/agent.log 2>&1'",
+            detach=True,
+        )
 
-        # 3. Wait for the agent to initialize eBPF and bind to the port
+        # 3. Wait for it to bind
         started = False
         for _ in range(10):
-            logs = container.logs().decode()
+            _, out = container.exec_run("cat /tmp/agent.log")
+            logs = out.decode()
             if "Listening on TCP port 2222" in logs:
                 started = True
                 break
             time.sleep(1)
-        
-        assert started, f"Agent failed to start within timeout. Container Logs:\n{container.logs().decode()}"
+
+        assert started, f"Agent failed to start within timeout. Agent log:\n{logs}"
 
         # 4. Get the mapped host port so the client can connect
         container.reload()
