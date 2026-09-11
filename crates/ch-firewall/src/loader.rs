@@ -98,6 +98,10 @@ impl Firewall {
             .clone()
     }
 
+    pub fn try_global() -> Option<Arc<Firewall>> {
+        FIREWALL.get().cloned()
+    }
+
     /// Loads the embedded eBPF bytecode and loads the program into the
     /// kernel, but does NOT attach it to any interface yet. Call `run()`
     /// (or `spawn_supervised()`) to start attaching to interfaces and

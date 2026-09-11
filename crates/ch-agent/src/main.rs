@@ -123,8 +123,16 @@ async fn main() -> Result<()> {
         store,
     });
 
-    let firewall = Firewall::init_global()?;
-    let handle = firewall.clone().spawn_supervised();
+    let firewall_handle = match Firewall::init_global() {
+        Ok(fw) => {
+            tracing::info!("Firewall initialized successfully");
+            Some(fw.clone().spawn_supervised())
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load firewall (running in degraded mode): {}", e);
+            None
+        }
+    };
     
     let port = CH_PORT;
 
@@ -143,10 +151,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Trigger graceful firewall cleanup and wait for detachment to complete
-    tracing::info!("Shutting down firewall and detaching interfaces");
-    firewall.shutdown();
-    let _ = handle.await;
+    if let Some(fw) = Firewall::try_global() {
+        // Trigger graceful firewall cleanup and wait for detachment to complete
+        tracing::info!("Shutting down firewall and detaching interfaces");
+        fw.shutdown();
+    }
+    if let Some(handle) = firewall_handle {
+        let _ = handle.await;
+    }
     
     Ok(())
 }
