@@ -5,6 +5,8 @@ import io
 import time
 import os
 import subprocess
+import contextlib
+import socket
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -171,7 +173,7 @@ def _container_pid_and_ip(container):
 
 
 @contextlib.contextmanager
-def python_server_in_container(container, port=TARGET_PORT):
+def python_server_in_container(container, port):
     """
     Runs the HOST's python http.server inside the CONTAINER's network namespace
     (nsenter -n), so it listens on the container's eth0 behind the firewall
