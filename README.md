@@ -45,3 +45,14 @@ Target hosts are Linux; the agent is Linux-only. Static builds:
 cargo build --release --target x86_64-unknown-linux-musl
 cargo build --release --target aarch64-unknown-linux-musl
 ```
+
+
+
+## Disclaimer & Limitation of Liability
+
+This software is provided for educational, testing, authorized defensive security operations, and incident response exercises only. 
+
+By using this software, you agree that:
+- The software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and noninfringement.
+- In no event shall the authors, contributors, or copyright holders be liable for any claim, damages, data loss, network outages, host lockouts, or any other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+- You are solely responsible for ensuring that your usage of this software complies with all applicable local, state, national, and international laws, regulations, and rules of engagement.
