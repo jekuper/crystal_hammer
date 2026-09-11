@@ -158,7 +158,7 @@ def test_agent_connectivity(docker_client, build_binaries, image):
                 client_exit=result.returncode,
             )
 
-        if "Authenticated SSH session established" not in stderr:
+        if "Authenticated SSH session established" not in stdout:
             fail_with_diagnostics(
                 container, "Client failed to authenticate.",
                 client_stdout=stdout, client_stderr=stderr,
