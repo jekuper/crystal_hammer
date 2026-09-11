@@ -165,10 +165,21 @@ def run_client(build_binaries, container, mapped_port, stdin, timeout=10):
 def _container_pid_and_ip(container):
     container.reload()
     pid = container.attrs["State"]["Pid"]
-    ip = container.attrs["NetworkSettings"]["IPAddress"]
-    if not ip:  # custom network: fall back to the first attached network
-        nets = container.attrs["NetworkSettings"]["Networks"]
-        ip = next(iter(nets.values()))["IPAddress"]
+    net = container.attrs["NetworkSettings"]
+
+    # Prefer the legacy top-level IP (default bridge), but it's often absent.
+    ip = net.get("IPAddress") or ""
+
+    # Fall back to the first network that actually has an address.
+    if not ip:
+        for cfg in net.get("Networks", {}).values():
+            if cfg.get("IPAddress"):
+                ip = cfg["IPAddress"]
+                break
+
+    if not ip:
+        raise RuntimeError(
+            f"container has no IP address yet; NetworkSettings={net!r}")
     return pid, ip
 
 
