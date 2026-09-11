@@ -1,2 +1,2 @@
 pytest==8.0.0
-docker==7.0.0
+docker>=7.1.0
