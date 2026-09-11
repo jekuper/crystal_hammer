@@ -2,6 +2,8 @@
 /target/
 /crates/ch-firewall-ebpf/target
 
+.venv/
+
 # Remove this if you want to force check-in of your Cargo.lock (see guide below)
 # Cargo.lock
 

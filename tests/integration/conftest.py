@@ -25,6 +25,8 @@ IMAGES = [
 # Where the agent's stdout/stderr is captured inside each container.
 AGENT_LOG = "/tmp/agent.log"
 
+ALLOWED_PORT = 8001   # passed to `lockdown`, must stay reachable
+BLOCKED_PORT = 8002   # NOT passed, must be blocked under lockdown
 
 # ---------------------------------------------------------------------------
 # Session-scoped fixtures (Docker + build)
@@ -156,6 +158,49 @@ def run_client(build_binaries, container, mapped_port, stdin, timeout=10):
         result.stderr.decode(errors="replace"),
         result.returncode,
     )
+
+
+def _container_pid_and_ip(container):
+    container.reload()
+    pid = container.attrs["State"]["Pid"]
+    ip = container.attrs["NetworkSettings"]["IPAddress"]
+    if not ip:  # custom network: fall back to the first attached network
+        nets = container.attrs["NetworkSettings"]["Networks"]
+        ip = next(iter(nets.values()))["IPAddress"]
+    return pid, ip
+
+
+@contextlib.contextmanager
+def python_server_in_container(container, port=TARGET_PORT):
+    """
+    Runs the HOST's python http.server inside the CONTAINER's network namespace
+    (nsenter -n), so it listens on the container's eth0 behind the firewall
+    without needing python in the image. Requires the test to run as root.
+    """
+    pid, ip = _container_pid_and_ip(container)
+    proc = subprocess.Popen(
+        ["nsenter", "-t", str(pid), "-n",
+         "python3", "-m", "http.server", str(port), "--bind", "0.0.0.0"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        yield ip, port
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def can_connect(ip, port, timeout=2.0):
+    """True if a TCP connection completes; False on refuse OR timeout (a
+    dropped SYN under lockdown shows up as a timeout, which we treat as blocked)."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:  # covers ConnectionRefused, timeout, unreachable
+        return False
 
 
 # ---------------------------------------------------------------------------
