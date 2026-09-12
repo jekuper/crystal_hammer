@@ -1,3 +1,5 @@
+import tempfile
+
 import pytest
 import docker
 import tarfile
@@ -187,23 +189,47 @@ def _container_pid_and_ip(container):
 def python_server_in_container(container, port):
     """
     Runs the HOST's python http.server inside the CONTAINER's network namespace
-    (nsenter -n), so it listens on the container's eth0 behind the firewall
-    without needing python in the image. Requires the test to run as root.
+    so it listens on the container's eth0 behind the firewall. nsenter needs
+    root: we're root locally but not on CI, so sudo when euid != 0.
     """
     pid, ip = _container_pid_and_ip(container)
+    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
+
+    logf = tempfile.NamedTemporaryFile(
+        prefix=f"srv-{port}-", suffix=".log", delete=False, mode="w+")
     proc = subprocess.Popen(
-        ["nsenter", "-t", str(pid), "-n",
-         "python3", "-m", "http.server", str(port), "--bind", "0.0.0.0"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        sudo + ["nsenter", "-t", str(pid), "-n",
+                "python3", "-m", "http.server", str(port), "--bind", "0.0.0.0"],
+        stdout=logf, stderr=subprocess.STDOUT,
     )
+
+    # Fail fast and loud if the spawn itself died (the usual cause is nsenter
+    # needing root, or sudo not being passwordless).
+    time.sleep(0.3)
+    if proc.poll() is not None:
+        with open(logf.name) as fh:
+            output = fh.read()
+        raise RuntimeError(
+            f"http server for port {port} exited immediately (rc={proc.returncode}).\n"
+            f"--- server output ---\n{output}\n"
+            f"If this is a permission error, nsenter needs root — the helper "
+            f"sudo's when non-root, so ensure passwordless sudo is available."
+        )
+
     try:
         yield ip, port
     finally:
-        proc.terminate()
+        # Can't reliably signal a root-owned process from a non-root parent, so
+        # match the unique port in the cmdline instead of proc.terminate().
+        subprocess.run(sudo + ["pkill", "-f", f"http.server {port}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            pass
+        logf.close()
+        with contextlib.suppress(OSError):
+            os.unlink(logf.name)
 
 
 def can_connect(ip, port, timeout=2.0):
