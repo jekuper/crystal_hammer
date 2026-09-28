@@ -13,6 +13,9 @@ CACHE=${CACHE_DIR:-$HOME/.cache/ch-vm}
 WORK=${WORK_DIR:-/tmp/ch-vm}
 SSH_PORT=${SSH_PORT:-2200}
 MEM=${VM_MEM:-4G}
+# Cloud images ship a ~2GB root that's nearly full; grow the GUEST disk so the
+# fs (expanded on first boot by cloud-init growpart) has room for apt installs.
+DISK_SIZE=${VM_DISK:-20G}
 
 mkdir -p "$CACHE" "$WORK"
 
@@ -26,6 +29,9 @@ fi
 # Copy-on-write overlay: the cached base image is never modified.
 FMT=$(qemu-img info --output=json "$BASE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["format"])')
 qemu-img create -q -f qcow2 -F "$FMT" -b "$BASE" "$WORK/disk.qcow2"
+# Grow the overlay's virtual size. The backing image is untouched; the new
+# range reads as zeros until cloud-init's growpart/resize2fs claims it.
+qemu-img resize -q "$WORK/disk.qcow2" "$DISK_SIZE"
 
 [ -f "$WORK/key" ] || ssh-keygen -q -t ed25519 -N "" -f "$WORK/key"
 
@@ -70,6 +76,29 @@ done
 
 # Wait for package installs etc. to finish before tests start.
 "${SSH[@]}" 'cloud-init status --wait >/dev/null 2>&1 || true'
+
+# Most cloud images auto-grow root on first boot. If one didn't (so root is
+# still tiny), try to grow it explicitly. Root is the last partition on these
+# images, so growpart + the fs-specific resize is safe. Best-effort.
+"${SSH[@]}" 'sh -s' <<'GROW' || echo "warn: explicit fs-grow step failed"
+set +e
+root_src=$(findmnt -no SOURCE / 2>/dev/null); root_fs=$(findmnt -no FSTYPE / 2>/dev/null)
+avail_kb=$(df -Pk / | awk 'NR==2{print $4}')
+# Only bother if less than ~2GB free.
+if [ "${avail_kb:-0}" -lt 2000000 ] && [ -n "$root_src" ]; then
+  dev=$(lsblk -npo PKNAME "$root_src" 2>/dev/null | head -1)
+  partnum=$(echo "$root_src" | grep -o '[0-9]*$')
+  command -v growpart >/dev/null && [ -n "$dev" ] && growpart "$dev" "$partnum" 2>/dev/null
+  case "$root_fs" in
+    ext*) resize2fs "$root_src" 2>/dev/null ;;
+    xfs)  xfs_growfs / 2>/dev/null ;;
+    btrfs) btrfs filesystem resize max / 2>/dev/null ;;
+  esac
+fi
+true
+GROW
+
+echo "guest disk usage:"; "${SSH[@]}" 'df -h / | sed "s/^/  /"'
 
 # Diagnostic tools for the harness's hung-agent probe. Best-effort: a distro
 # without them just yields "(no strace)"/"(no bpftool)" in the report. Set
