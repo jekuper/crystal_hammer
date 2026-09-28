@@ -278,10 +278,49 @@ def bpf_snapshot(target, when):
     command -v bpftool >/dev/null && {{ bpftool prog show 2>/dev/null; bpftool map show 2>/dev/null; }} || echo '(no bpftool)'
     echo '--- stray ch-agent procs ---'; ps -eo pid,ppid,args 2>/dev/null | grep -F ch-agent | grep -v grep || echo '(none)'
     echo '--- port {AGENT_PORT} listeners ---'; ss -ltnp 2>/dev/null | grep ':{AGENT_PORT} ' || echo '(none)'
+    echo '--- GLOBAL (non-netns) leak surfaces ---'
+    echo 'cgroup-attached bpf:'
+    if command -v bpftool >/dev/null; then bpftool cgroup tree 2>/dev/null | head -n 30 || echo '(query failed)'; else echo '(no bpftool — install to see cgroup progs)'; fi
+    echo 'kernel bpf prog/map ids (leak = growing count):'
+    if command -v bpftool >/dev/null; then echo "progs=$(bpftool prog show 2>/dev/null | grep -c '^[0-9]') maps=$(bpftool map show 2>/dev/null | grep -c '^[0-9]')"; else echo '(no bpftool)'; fi
+    echo 'SysV IPC:'; ipcs -a 2>/dev/null | grep -A3 -iE 'semaphore|shared' | grep '^0x' || echo '(none)'
+    echo 'ch-* systemd units:'; systemctl list-units --all --no-legend 2>/dev/null | grep -iE 'crystal|ch-' || echo '(none)'
+    echo 'agent-owned lock/pid files (common dirs):'
+    ls -lt /run /var/run /tmp /var/lib 2>/dev/null | grep -iE 'crystal|ch[-_]?agent|ch[.](lock|pid)' || echo '(none obvious)'
     """
     print(f"\n======== BPF SNAPSHOT [{when}] on {target.name} ========")
     print(_try(target, script).rstrip())
     print("======== END SNAPSHOT ========")
+
+
+def hung_agent_report(target):
+    """The agent is alive but stuck. Capture WHERE. /proc/<pid>/{stack,wchan,
+    syscall} and the per-thread states name the exact block: a futex means a
+    userspace lock/mutex; flock in syscall + a lock file in fd means a file
+    lock; a connect/read on a socket points at IPC or dbus. strace (if present)
+    shows the syscall it's spinning or sleeping in live."""
+    script = f"""
+    pid=$(pgrep -f '{REMOTE_DIR}/ch-agent' | head -1)
+    [ -z "$pid" ] && pid=$(cat {AGENT_PID} 2>/dev/null)
+    echo "agent pid: ${{pid:-<none>}}"
+    [ -z "$pid" ] && exit 0
+    echo '--- status ---'; grep -E '^(State|Threads|VmLck|SigBlk):' /proc/$pid/status 2>/dev/null
+    echo '--- wchan (kernel sleep symbol) ---'; cat /proc/$pid/wchan 2>/dev/null; echo
+    echo '--- syscall (nr + args; first field is the syscall number) ---'; cat /proc/$pid/syscall 2>/dev/null
+    echo '--- kernel stack ---'; cat /proc/$pid/stack 2>/dev/null || echo '(needs root + CONFIG_STACKTRACE)'
+    echo '--- per-thread state/wchan/stack ---'
+    for t in /proc/$pid/task/*; do
+      echo "thread ${{t##*/}}: wchan=$(cat $t/wchan 2>/dev/null)"
+      cat $t/stack 2>/dev/null
+    done
+    echo '--- open fds (a lock file / socket the agent waits on shows here) ---'; ls -l /proc/$pid/fd 2>/dev/null
+    echo '--- fdinfo flock lines ---'; grep -l . /proc/$pid/fdinfo/* 2>/dev/null | xargs grep -H -i 'lock' 2>/dev/null | head
+    echo '--- strace 2s ---'
+    if command -v strace >/dev/null; then timeout 2 strace -f -tt -p $pid 2>&1 | tail -n 40; else echo '(no strace — install strace in the VM)'; fi
+    """
+    print(f"\n======== HUNG AGENT REPORT on {target.name} ========")
+    print(_try(target, script).rstrip())
+    print("======== END HUNG AGENT REPORT ========")
 
 
 def _kill_agent_tree(target):
@@ -332,6 +371,8 @@ def agent(target):
                 # Snapshot again on the hang so the failure report carries the
                 # live state, not just the log that stops at "Loading...".
                 bpf_snapshot(target, "on startup timeout")
+                # And capture exactly where the alive-but-stuck agent is blocked.
+                hung_agent_report(target)
                 fail_with_diagnostics(a, "Agent failed to start within 15s.")
             time.sleep(0.3)
         yield a

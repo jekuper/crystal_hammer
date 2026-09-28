@@ -70,4 +70,24 @@ done
 
 # Wait for package installs etc. to finish before tests start.
 "${SSH[@]}" 'cloud-init status --wait >/dev/null 2>&1 || true'
+
+# Diagnostic tools for the harness's hung-agent probe. Best-effort: a distro
+# without them just yields "(no strace)"/"(no bpftool)" in the report. Set
+# CH_SKIP_DIAG_TOOLS=1 to keep the box maximally stock.
+if [ "${CH_SKIP_DIAG_TOOLS:-0}" != "1" ]; then
+  "${SSH[@]}" 'sh -s' <<'DIAG' || echo "warn: diagnostic-tool install failed (probe will show fewer details)"
+set +e
+if   command -v apt-get >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq && apt-get install -y -qq strace linux-tools-common "linux-tools-$(uname -r)" iproute2 >/dev/null 2>&1 \
+    || apt-get install -y -qq strace iproute2 >/dev/null 2>&1
+elif command -v dnf     >/dev/null; then dnf install -y -q strace bpftool iproute >/dev/null 2>&1
+elif command -v zypper  >/dev/null; then zypper -n in strace bpftool iproute2 >/dev/null 2>&1
+elif command -v apk     >/dev/null; then apk add --no-cache strace bpftool iproute2 >/dev/null 2>&1
+fi
+true
+DIAG
+fi
+
 "${SSH[@]}" 'echo "kernel: $(uname -r)"; . /etc/os-release; echo "distro: $PRETTY_NAME"'
+"${SSH[@]}" 'echo "diag tools:"; for t in strace bpftool ss; do printf "  %s: " "$t"; command -v "$t" || echo "(missing)"; done'
