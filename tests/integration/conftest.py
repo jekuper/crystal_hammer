@@ -1,310 +1,361 @@
-import tempfile
+"""
+Integration harness for ch-agent. Runs against a real kernel.
+
+Every test talks to a *target*: a machine (normally a VM) where we can run
+shell commands as root. Choose it with CH_TARGET:
+
+    ssh://root@127.0.0.1:2200   a VM booted by CI (one kernel/distro per job)
+    docker://debian:12          a privileged container for a fast local loop
+                                (NOTE: this uses YOUR host kernel)
+
+Optional env:
+    CH_SSH_KEY       private key for ssh targets
+    CH_BIN_DIR       dir holding prebuilt `agent`, `client`, `id_rsa`
+                     (default: build from the repo with `make build-all`)
+    CH_AGENT_ARGS    extra args for ch-agent (e.g. an interface flag)
+    CH_DOCKER_PREP   setup command for docker targets
+
+Inside the target the agent runs in its own network namespace, wired to the
+root namespace with a veth pair:
+
+    root netns: client + probes            netns "chtest": agent + servers
+    ch-host 10.99.0.1/24  <==== veth ====>  ch-tgt 10.99.0.2/24
+
+Every probe is a real packet through the target kernel's datapath. The
+firewall only ever sees ch-tgt, so a lockdown bug cannot cut off the SSH
+session that is driving the test.
+"""
+
+import contextlib
+import os
+import shlex
+import subprocess
+import time
+import uuid
+from urllib.parse import urlparse
 
 import pytest
-import docker
-import tarfile
-import io
-import time
-import os
-import subprocess
-import contextlib
-import socket
 
 # ---------------------------------------------------------------------------
-# Shared constants
+# Constants
 # ---------------------------------------------------------------------------
 
-# The list of target distributions to emulate. Referenced by tests via the
-# `image` parametrize marker; kept here so every test file shares one list.
-IMAGES = [
-    "alpine:latest",
-    "ubuntu:24.04",
-    "ubuntu:16.04",
-    "debian:12",
-    "rockylinux:9",
-    "opensuse/leap:latest",       # Enterprise stable SUSE
-    "opensuse/tumbleweed:latest"  # Bleeding-edge SUSE
-]
+NETNS = "chtest"
+HOST_IF, TGT_IF = "ch-host", "ch-tgt"
+HOST_IP, TGT_IP = "10.99.0.1", "10.99.0.2"
 
-# Where the agent's stdout/stderr is captured inside each container.
-AGENT_LOG = "/tmp/agent.log"
-
+AGENT_PORT = 2222
 ALLOWED_PORT = 8001   # passed to `lockdown`, must stay reachable
 BLOCKED_PORT = 8002   # NOT passed, must be blocked under lockdown
 
+REMOTE_DIR = "/opt/ch"
+AGENT_LOG = "/tmp/ch-agent.log"
+AGENT_PID = "/tmp/ch-agent.pid"
+AGENT_ARGS = os.environ.get("CH_AGENT_ARGS", "")
+
+# Enter ONLY the network namespace. `ip netns exec` would also unshare the
+# mount namespace and remount /sys, which hides /sys/fs/bpf from the agent.
+IN_NS = f"nsenter --net=/var/run/netns/{NETNS}"
+
+REQUIRED_TOOLS = ["ip", "nsenter", "setsid", "timeout", "python3"]
+
+_NETNS_DOWN = f"""
+ip netns del {NETNS} 2>/dev/null
+ip link del {HOST_IF} 2>/dev/null
+true
+"""
+
+_NETNS_UP = _NETNS_DOWN + f"""
+set -e
+ip netns add {NETNS}
+ip link add {HOST_IF} type veth peer name {TGT_IF}
+ip link set {TGT_IF} netns {NETNS}
+ip addr add {HOST_IP}/24 dev {HOST_IF}
+ip link set {HOST_IF} up
+{IN_NS} ip link set lo up
+{IN_NS} ip addr add {TGT_IP}/24 dev {TGT_IF}
+{IN_NS} ip link set {TGT_IF} up
+"""
+
 # ---------------------------------------------------------------------------
-# Session-scoped fixtures (Docker + build)
+# Targets
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
-def docker_client():
-    """Provides a Docker client connected to the host's daemon."""
-    return docker.from_env()
+
+class Target:
+    """Something with its own kernel that we can run root shell scripts on."""
+
+    name = "target"
+
+    def sh(self, script, *, stdin=None, timeout=60):
+        raise NotImplementedError
+
+    def close(self):
+        pass
+
+    def check(self, script, **kw):
+        r = self.sh(script, **kw)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"[{self.name}] command failed (rc={r.returncode}):\n{script}\n"
+                f"--- stdout ---\n{r.stdout.decode(errors='replace')}\n"
+                f"--- stderr ---\n{r.stderr.decode(errors='replace')}")
+        return r.stdout.decode(errors="replace")
+
+    def put(self, local_path, remote_path, mode="755"):
+        with open(local_path, "rb") as f:
+            data = f.read()
+        d = os.path.dirname(remote_path)
+        self.check(f"mkdir -p {d} && cat > {remote_path} && chmod {mode} {remote_path}",
+                   stdin=data)
 
 
-@pytest.fixture(scope="session")
-def build_binaries():
-    """
-    Ensures that the agent and client binaries exist.
-    If they don't, it generates the keypair and triggers 'make build-all'.
-    """
+class SshTarget(Target):
+    def __init__(self, user, host, port, key=None):
+        self.name = f"ssh:{user}@{host}:{port}"
+        self.dest = f"{user}@{host}"
+        # ControlMaster reuses one TCP+auth handshake for every command.
+        self._ctl = f"/tmp/ch-ssh-{uuid.uuid4().hex[:8]}"
+        self._ssh = [
+            "ssh", "-p", str(port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=auto",
+            "-o", f"ControlPath={self._ctl}",
+            "-o", "ControlPersist=300",
+        ]
+        if key:
+            self._ssh += ["-i", key]
+
+    def sh(self, script, *, stdin=None, timeout=60):
+        return subprocess.run(
+            self._ssh + [self.dest, "sh -c " + shlex.quote(script)],
+            input=stdin if stdin is not None else b"",
+            capture_output=True, timeout=timeout)
+
+    def close(self):
+        subprocess.run(self._ssh + ["-O", "exit", self.dest], capture_output=True)
+
+
+class DockerTarget(Target):
+    """Local convenience only: shares the host kernel, so it proves nothing
+    about other kernels. Use it to iterate on tests quickly."""
+
+    DEFAULT_PREP = ("apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
+                    "apt-get install -y -qq iproute2 python3 util-linux >/dev/null")
+
+    def __init__(self, image):
+        self.name = f"docker:{image}"
+        self.cid = subprocess.check_output([
+            "docker", "run", "-d", "--privileged",
+            "-v", "/sys/fs/bpf:/sys/fs/bpf",
+            image, "sleep", "infinity"]).decode().strip()
+        prep = os.environ.get("CH_DOCKER_PREP", self.DEFAULT_PREP)
+        if prep:
+            self.check(prep, timeout=600)
+
+    def sh(self, script, *, stdin=None, timeout=60):
+        return subprocess.run(
+            ["docker", "exec", "-i", self.cid, "sh", "-c", script],
+            input=stdin if stdin is not None else b"",
+            capture_output=True, timeout=timeout)
+
+    def close(self):
+        subprocess.run(["docker", "rm", "-f", self.cid], capture_output=True)
+
+
+def make_target(spec):
+    u = urlparse(spec)
+    if u.scheme == "ssh":
+        return SshTarget(u.username or "root", u.hostname, u.port or 22,
+                         os.environ.get("CH_SSH_KEY"))
+    if u.scheme == "docker":
+        return DockerTarget(spec[len("docker://"):])
+    raise pytest.UsageError(f"Unsupported CH_TARGET: {spec!r}")
+
+
+# ---------------------------------------------------------------------------
+# Session fixtures: binaries + one target for the whole run
+# ---------------------------------------------------------------------------
+
+
+def _build_locally():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-    agent_path = os.path.join(repo_root, "target/agent")
-    client_path = os.path.join(repo_root, "target/client")
     key_path = os.path.join(repo_root, "id_rsa")
+    agent = os.path.join(repo_root, "target/agent")
+    client = os.path.join(repo_root, "target/client")
 
-    # 1. Generate keypair if missing (required at compile-time by agent & runtime by client)
     if not os.path.exists(key_path):
         print("\nNo team key found. Generating temporary test keypair...")
-        subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", "id_rsa", "-C", "local-test-key"],
-            cwd=repo_root,
-            check=True,
-        )
-
-    # 2. Build binaries if missing
-    if not os.path.exists(agent_path) or not os.path.exists(client_path):
+        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", "id_rsa",
+                        "-C", "local-test-key"], cwd=repo_root, check=True)
+    if not (os.path.exists(agent) and os.path.exists(client)):
         print("\nBinaries not found. Running 'make build-all'...")
         subprocess.run(["make", "build-all"], cwd=repo_root, check=True)
 
-    return {
-        "agent": agent_path,
-        "client": client_path,
-        "repo_root": repo_root,
-    }
+    return {"agent": agent, "client": client, "id_rsa": key_path}
 
 
-# ---------------------------------------------------------------------------
-# Container helpers
-# ---------------------------------------------------------------------------
-
-def copy_executable_to_container(container, src_path, dest_dir, dest_name="agent"):
-    """Copies a binary from the host into the container and makes it executable."""
-    stream = io.BytesIO()
-    with tarfile.open(fileobj=stream, mode='w') as tar:
-        tarinfo = tarfile.TarInfo(name=dest_name)
-        with open(src_path, 'rb') as f:
-            data = f.read()
-        tarinfo.size = len(data)
-        tarinfo.mode = 0o755  # Make it executable
-        tar.addfile(tarinfo, io.BytesIO(data))
-
-    stream.seek(0)
-    container.put_archive(dest_dir, stream)
+@pytest.fixture(scope="session")
+def binaries():
+    bin_dir = os.environ.get("CH_BIN_DIR")
+    if bin_dir:
+        paths = {n: os.path.abspath(os.path.join(bin_dir, n))
+                 for n in ("agent", "client", "id_rsa")}
+    else:
+        paths = _build_locally()
+    missing = [p for p in paths.values() if not os.path.exists(p)]
+    if missing:
+        pytest.exit(f"Missing binaries: {missing}", returncode=2)
+    return paths
 
 
-def read_agent_log(container):
-    """Reads the agent's captured stdout/stderr from inside the container."""
+@pytest.fixture(scope="session")
+def target(binaries):
+    t = make_target(os.environ.get("CH_TARGET", "docker://debian:12"))
     try:
-        code, out = container.exec_run(f"cat {AGENT_LOG}")
-        text = out.decode(errors="replace")
-        if code != 0 and not text.strip():
-            return "(no agent log — file missing or agent never wrote anything)"
-        return text
-    except Exception as e:  # container gone, daemon hiccup, etc.
-        return f"(could not read agent log: {e})"
+        missing = t.sh(
+            "for c in " + " ".join(REQUIRED_TOOLS) +
+            "; do command -v $c >/dev/null || echo $c; done").stdout.decode().split()
+        if missing:
+            pytest.exit(f"[{t.name}] harness tools missing on target: {missing}", returncode=2)
+
+        t.put(binaries["agent"], f"{REMOTE_DIR}/ch-agent")
+        t.put(binaries["client"], f"{REMOTE_DIR}/client")
+        t.put(binaries["id_rsa"], f"{REMOTE_DIR}/id_rsa", mode="600")
+        yield t
+    finally:
+        t.close()
 
 
-def fail_with_diagnostics(container, message, *, client_stdout="", client_stderr="",
+# ---------------------------------------------------------------------------
+# The running-agent fixture
+# ---------------------------------------------------------------------------
+
+
+class Agent:
+    def __init__(self, target):
+        self.target = target
+
+
+def _agent_alive(target):
+    return target.sh(f"kill -0 $(cat {AGENT_PID}) 2>/dev/null").returncode == 0
+
+
+@pytest.fixture
+def agent(target):
+    """
+    Fresh netns + fresh agent per test. The agent sees exactly one
+    non-loopback interface (ch-tgt). If it needs a flag to pick an interface,
+    set CH_AGENT_ARGS.
+    """
+    target.check(_NETNS_UP)
+    target.check(
+        f"setsid {IN_NS} {REMOTE_DIR}/ch-agent {AGENT_ARGS} "
+        f"</dev/null >{AGENT_LOG} 2>&1 & echo $! > {AGENT_PID}")
+    a = Agent(target)
+    try:
+        deadline = time.monotonic() + 15
+        while f"Listening on TCP port {AGENT_PORT}" not in read_agent_log(a):
+            if not _agent_alive(target):
+                fail_with_diagnostics(a, "Agent exited during startup.")
+            if time.monotonic() > deadline:
+                fail_with_diagnostics(a, "Agent failed to start within 15s.")
+            time.sleep(0.3)
+        yield a
+    finally:
+        target.sh(
+            f"p=$(cat {AGENT_PID} 2>/dev/null); [ -n \"$p\" ] && "
+            f"{{ kill $p; sleep 0.5; kill -9 $p; }} 2>/dev/null; rm -f {AGENT_PID}; true")
+        # If the agent pins maps/programs under /sys/fs/bpf, remove that pin
+        # dir here too so state can't leak from one test into the next.
+        target.sh(_NETNS_DOWN)
+
+
+# ---------------------------------------------------------------------------
+# Helpers used by tests
+# ---------------------------------------------------------------------------
+
+
+def _try(target, script):
+    try:
+        r = target.sh(script, timeout=20)
+        return (r.stdout + r.stderr).decode(errors="replace")
+    except Exception as e:  # VM gone, ssh hiccup, etc.
+        return f"(could not run: {e})"
+
+
+def read_agent_log(agent):
+    return _try(agent.target, f"cat {AGENT_LOG} 2>/dev/null")
+
+
+def fail_with_diagnostics(agent, message, *, client_stdout="", client_stderr="",
                           client_exit=None):
-    """
-    Aborts the test with everything we know: the message, the agent's own log,
-    and whatever the client printed. One place that formats all failures the
-    same way, so no matter which step breaks you get the full picture.
-    """
-    agent_log = read_agent_log(container)
-    report = [
-        message,
-        "",
-        "================ AGENT LOG (inside container) ================",
-        agent_log.rstrip() or "(empty)",
-        "================ CLIENT STDOUT ==============================",
-        client_stdout.rstrip() or "(empty)",
-        "================ CLIENT STDERR ==============================",
-        client_stderr.rstrip() or "(empty)",
+    """Abort with everything we know, formatted the same way for every failure."""
+    t = agent.target
+    sections = [
+        ("TARGET", t.name),
+        ("KERNEL", _try(t, "uname -a; . /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\"")),
+        ("AGENT LOG", read_agent_log(agent)),
+        (f"{TGT_IF} (attached programs)", _try(t, f"{IN_NS} ip -d link show {TGT_IF}")),
+        ("DMESG (tail)", _try(t, "dmesg 2>/dev/null | tail -n 40")),
+        ("CLIENT STDOUT", client_stdout),
+        ("CLIENT STDERR", client_stderr),
     ]
+    report = [message, ""]
+    for title, body in sections:
+        report += [f"================ {title} ================", body.rstrip() or "(empty)"]
     if client_exit is not None:
         report.append(f"================ CLIENT EXIT: {client_exit} ================")
     pytest.fail("\n".join(report), pytrace=False)
 
 
-def run_client(build_binaries, container, mapped_port, stdin, timeout=10):
-    """
-    Runs the client against a mapped port, feeding `stdin` to its REPL.
-
-    Returns (stdout, stderr, returncode) as decoded strings/int. On timeout it
-    dumps full diagnostics (agent log + partial client output) and fails the
-    test — it never returns in that case.
-    """
-    cmd = [
-        build_binaries["client"],
-        "--host", "127.0.0.1",
-        "--port", str(mapped_port),
-    ]
+def run_client(agent, stdin, timeout=15):
+    """Run the client from the root netns against the agent. Returns
+    (stdout, stderr, returncode); on a hang it fails with full diagnostics."""
+    script = (f"cd {REMOTE_DIR} && exec timeout {timeout} "
+              f"./client --host {TGT_IP} --port {AGENT_PORT}")
     try:
-        result = subprocess.run(
-            cmd,
-            input=stdin,
-            cwd=build_binaries["repo_root"],  # Must run here to find `id_rsa`
-            capture_output=True,
-            timeout=timeout,
-        )
+        r = agent.target.sh(script, stdin=stdin, timeout=timeout + 15)
     except subprocess.TimeoutExpired as e:
         fail_with_diagnostics(
-            container,
-            "Client timed out (never returned).",
+            agent, "Client/ssh session hung.",
             client_stdout=(e.stdout or b"").decode(errors="replace"),
-            client_stderr=(e.stderr or b"").decode(errors="replace"),
-        )
-
-    return (
-        result.stdout.decode(errors="replace"),
-        result.stderr.decode(errors="replace"),
-        result.returncode,
-    )
-
-
-def _container_pid_and_ip(container):
-    container.reload()
-    pid = container.attrs["State"]["Pid"]
-    net = container.attrs["NetworkSettings"]
-
-    # Prefer the legacy top-level IP (default bridge), but it's often absent.
-    ip = net.get("IPAddress") or ""
-
-    # Fall back to the first network that actually has an address.
-    if not ip:
-        for cfg in net.get("Networks", {}).values():
-            if cfg.get("IPAddress"):
-                ip = cfg["IPAddress"]
-                break
-
-    if not ip:
-        raise RuntimeError(
-            f"container has no IP address yet; NetworkSettings={net!r}")
-    return pid, ip
+            client_stderr=(e.stderr or b"").decode(errors="replace"))
+    out = r.stdout.decode(errors="replace")
+    err = r.stderr.decode(errors="replace")
+    if r.returncode == 124:
+        fail_with_diagnostics(agent, f"Client timed out after {timeout}s.",
+                              client_stdout=out, client_stderr=err, client_exit=124)
+    return out, err, r.returncode
 
 
 @contextlib.contextmanager
-def python_server_in_container(container, port):
-    """
-    Runs the HOST's python http.server inside the CONTAINER's network namespace
-    so it listens on the container's eth0 behind the firewall. nsenter needs
-    root: we're root locally but not on CI, so sudo when euid != 0.
-    """
-    pid, ip = _container_pid_and_ip(container)
-    sudo = [] if os.geteuid() == 0 else ["sudo", "-n"]
-
-    logf = tempfile.NamedTemporaryFile(
-        prefix=f"srv-{port}-", suffix=".log", delete=False, mode="w+")
-    proc = subprocess.Popen(
-        sudo + ["nsenter", "-t", str(pid), "-n",
-                "python3", "-m", "http.server", str(port), "--bind", "0.0.0.0"],
-        stdout=logf, stderr=subprocess.STDOUT,
-    )
-
-    # Fail fast and loud if the spawn itself died (the usual cause is nsenter
-    # needing root, or sudo not being passwordless).
-    time.sleep(0.3)
-    if proc.poll() is not None:
-        with open(logf.name) as fh:
-            output = fh.read()
-        raise RuntimeError(
-            f"http server for port {port} exited immediately (rc={proc.returncode}).\n"
-            f"--- server output ---\n{output}\n"
-            f"If this is a permission error, nsenter needs root — the helper "
-            f"sudo's when non-root, so ensure passwordless sudo is available."
-        )
-
+def http_server(agent, port):
+    """python http.server inside the agent's netns, i.e. behind the firewall."""
+    t = agent.target
+    pid = f"/tmp/ch-srv-{port}.pid"
+    t.check(f"setsid {IN_NS} python3 -m http.server {port} --bind 0.0.0.0 "
+            f"</dev/null >/tmp/ch-srv-{port}.log 2>&1 & echo $! > {pid}")
     try:
-        yield ip, port
+        yield TGT_IP, port
     finally:
-        # Can't reliably signal a root-owned process from a non-root parent, so
-        # match the unique port in the cmdline instead of proc.terminate().
-        subprocess.run(sudo + ["pkill", "-f", f"http.server {port}"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-        logf.close()
-        with contextlib.suppress(OSError):
-            os.unlink(logf.name)
+        t.sh(f"kill $(cat {pid}) 2>/dev/null; rm -f {pid}; true")
 
 
-def can_connect(ip, port, timeout=2.0):
-    """True if a TCP connection completes; False on refuse OR timeout (a
-    dropped SYN under lockdown shows up as a timeout, which we treat as blocked)."""
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
+def can_connect(agent, port, timeout=2.0):
+    """True if a TCP connect from the root netns to the agent's netns completes.
+    A dropped SYN shows up as a timeout, which counts as blocked."""
+    probe = f"import socket; socket.create_connection(('{TGT_IP}', {port}), {timeout}).close()"
+    r = agent.target.sh(f"python3 -c {shlex.quote(probe)}", timeout=timeout + 15)
+    return r.returncode == 0
+
+
+def eventually(pred, tries=10, delay=0.5):
+    for _ in range(tries):
+        if pred():
             return True
-    except OSError:  # covers ConnectionRefused, timeout, unreachable
-        return False
-
-
-# ---------------------------------------------------------------------------
-# The running-agent fixture: one privileged container with ch-agent bound
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def running_agent(docker_client, build_binaries, image):
-    """
-    Yields a dict describing a container that has ch-agent running and listening
-    on port 2222, plus the ephemeral host port it's mapped to.
-
-    Any test that needs a live agent depends on this fixture and receives:
-        {
-            "container":   <docker container object>,
-            "host_port":   <str, the mapped 127.0.0.1 port>,
-        }
-
-    The container is always torn down afterward, even on failure.
-    """
-    # Pull image if it doesn't exist locally
-    try:
-        docker_client.images.get(image)
-    except docker.errors.ImageNotFound:
-        docker_client.images.pull(image)
-
-    # Spin up the container (privileged and with BPF mounted for ch-firewall eBPF)
-    container = docker_client.containers.run(
-        image,
-        command="sleep infinity",
-        detach=True,
-        privileged=True,
-        volumes={'/sys/fs/bpf': {'bind': '/sys/fs/bpf', 'mode': 'rw'}},
-        ports={'2222/tcp': None},  # Map 2222 to a random ephemeral host port
-    )
-
-    try:
-        # Drop the agent in
-        copy_executable_to_container(
-            container, build_binaries["agent"], "/usr/local/bin", "ch-agent"
-        )
-
-        # Run it in the background, capturing output to a file we can read
-        # (container.logs() only sees the main `sleep infinity` process).
-        container.exec_run(
-            f"sh -c '/usr/local/bin/ch-agent > {AGENT_LOG} 2>&1'",
-            detach=True,
-        )
-
-        # Wait for it to initialize eBPF and bind
-        started = False
-        for _ in range(10):
-            if "Listening on TCP port 2222" in read_agent_log(container):
-                started = True
-                break
-            time.sleep(1)
-
-        if not started:
-            fail_with_diagnostics(container, "Agent failed to start within timeout.")
-
-        # Resolve the mapped host port
-        container.reload()
-        host_port = container.attrs['NetworkSettings']['Ports']['2222/tcp'][0]['HostPort']
-
-        yield {"container": container, "host_port": host_port}
-
-    finally:
-        container.remove(force=True)
+        time.sleep(delay)
+    return False
