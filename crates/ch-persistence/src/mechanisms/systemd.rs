@@ -76,16 +76,20 @@ impl Mechanism for Systemd {
             systemctl_checked(&["daemon-reload"])?;
         }
 
-        // enable is idempotent (re-enabling an enabled unit is a no-op).
         systemctl_checked(&["enable", SERVICE_NAME])?;
 
         // Apply the running state. On a real change we restart so an updated
         // ExecStart takes effect now; otherwise a plain start is a no-op when
         // the service is already up. This is what makes repeated installs safe.
+        //
+        // We pass --no-block because if the service is currently waiting in an
+        // auto-restart timer (e.g. from failing to acquire the pid lock in a
+        // previous test), systemctl can hang waiting for the next start job to
+        // complete, timing out the integration tests.
         if changed {
-            systemctl_checked(&["restart", SERVICE_NAME])?;
+            systemctl_checked(&["restart", "--no-block", SERVICE_NAME])?;
         } else {
-            systemctl_checked(&["start", SERVICE_NAME])?;
+            systemctl_checked(&["start", "--no-block", SERVICE_NAME])?;
         }
 
         Ok(())
@@ -115,9 +119,10 @@ impl Mechanism for Systemd {
 
         let unit_path = Path::new(UNIT_DIR).join(SERVICE_NAME);
 
-        // Stop + unlink the enable symlinks. Ignore failure: the unit may already
-        // be gone, which is exactly the state we want.
-        let _ = systemctl_status(&["disable", "--now", SERVICE_NAME]);
+        // Stop the service without blocking, then disable it. Ignore failures
+        // because the unit may already be gone, which is exactly the state we want.
+        let _ = systemctl_status(&["stop", "--no-block", SERVICE_NAME]);
+        let _ = systemctl_status(&["disable", SERVICE_NAME]);
 
         if unit_path.exists() {
             fs::remove_file(&unit_path)?;
@@ -125,6 +130,7 @@ impl Mechanism for Systemd {
         }
         Ok(())
     }
+    
     fn info(&self) -> String {
         // We re-use the logic from check() to see if we are currently "Enabled"
         let is_enabled = match self.check() {
