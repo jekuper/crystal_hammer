@@ -63,6 +63,8 @@ PUBKEY=$(cat "$WORK/key.pub")
   echo "  - echo 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/00-ch-permit.conf"
   echo "  - sh -c \"grep -qE '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config && sed -i 's/^[[:space:]]*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config\""
   echo "  - sh -c \"rc-service sshd restart 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true\""
+  echo "  - sh -c \"echo 'PerSourcePenalties no' >> /etc/ssh/sshd_config; /usr/sbin/sshd -t 2>/dev/null || sshd -t 2>/dev/null || sed -i '/^PerSourcePenalties no/d' /etc/ssh/sshd_config\""
+  echo "  - sh -c \"systemctl restart sshd.socket 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || rc-service sshd restart 2>/dev/null || true\""
 } > "$WORK/user-data"
 printf 'instance-id: ch-%s\nlocal-hostname: ch-%s\n' "$NAME" "$NAME" > "$WORK/meta-data"
 genisoimage -quiet -output "$WORK/seed.iso" -volid cidata -joliet -rock \
