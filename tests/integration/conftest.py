@@ -452,10 +452,16 @@ def run_client(agent, stdin, timeout=15):
 
 @contextlib.contextmanager
 def http_server(agent, port):
-    """python http.server inside the agent's netns, i.e. behind the firewall."""
+    """Simple python server inside the agent's netns, i.e. behind the firewall."""
     t = agent.target
     pid = f"/tmp/ch-srv-{port}.pid"
-    t.check(f"setsid {IN_NS} python3 -m http.server {port} --bind 0.0.0.0 "
+    py_cmd = (
+        f"import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); "
+        f"s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+        f"s.bind(('0.0.0.0', {port})); s.listen(5); "
+        f"[c.close() for c, _ in iter(s.accept, None)]"
+    )
+    t.check(f"setsid {IN_NS} python3 -c {shlex.quote(py_cmd)} "
             f"</dev/null >/tmp/ch-srv-{port}.log 2>&1 & echo $! > {pid}")
     try:
         yield TGT_IP, port
