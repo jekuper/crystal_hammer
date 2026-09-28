@@ -34,19 +34,30 @@ qemu-img create -q -f qcow2 -F "$FMT" -b "$BASE" "$WORK/disk.qcow2"
 qemu-img resize -q "$WORK/disk.qcow2" "$DISK_SIZE"
 
 [ -f "$WORK/key" ] || ssh-keygen -q -t ed25519 -N "" -f "$WORK/key"
+PUBKEY=$(cat "$WORK/key.pub")
 
 {
   echo "#cloud-config"
   echo "disable_root: false"
   echo "ssh_pwauth: false"
+  # Default-user key (user varies: alpine/ubuntu/debian/...). Not enough on its
+  # own — the harness logs in as root, and not every image copies this to root.
   echo "ssh_authorized_keys:"
-  echo "  - $(cat "$WORK/key.pub")"
+  echo "  - $PUBKEY"
   if [ -n "$PKGS" ]; then
     echo "packages:"
     for p in $PKGS; do echo "  - $p"; done
   fi
-  # Deliberately NOT mounting /sys/fs/bpf or tweaking anything else:
-  # the point of this tier is to see what the agent meets on a stock box.
+  # Put the key into ROOT explicitly so `ssh root@...` works everywhere, and
+  # make sure sshd permits key-based root login. Alpine's cloud-init doesn't
+  # seed root the way the systemd distros do; this makes them all uniform.
+  # (Still NOT mounting /sys/fs/bpf — the box stays stock in every other way.)
+  echo "runcmd:"
+  echo "  - install -d -m 700 /root/.ssh"
+  echo "  - printf '%s\\n' '$PUBKEY' >> /root/.ssh/authorized_keys"
+  echo "  - chmod 600 /root/.ssh/authorized_keys"
+  echo "  - sh -c \"grep -qE '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config && sed -i 's/^[[:space:]]*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || echo 'PermitRootLogin prohibit-password' >> /etc/ssh/sshd_config\""
+  echo "  - sh -c \"rc-service sshd restart 2>/dev/null || systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true\""
 } > "$WORK/user-data"
 printf 'instance-id: ch-%s\nlocal-hostname: ch-%s\n' "$NAME" "$NAME" > "$WORK/meta-data"
 genisoimage -quiet -output "$WORK/seed.iso" -volid cidata -joliet -rock \
@@ -69,7 +80,15 @@ echo "Waiting for SSH..."
 for i in $(seq 1 120); do
   if "${SSH[@]}" true 2>/dev/null; then break; fi
   if [ "$i" -eq 120 ]; then
-    echo "VM never became reachable. Console:"; tail -n 100 "$WORK/console.log"; exit 1
+    echo "VM never became reachable."
+    # One verbose attempt so an auth rejection (publickey vs connection refused)
+    # is visible instead of guessed at.
+    echo "=== verbose ssh attempt ==="
+    ssh -vv -p "$SSH_PORT" -i "$WORK/key" -o BatchMode=yes -o ConnectTimeout=5 \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        root@127.0.0.1 true 2>&1 | grep -iE 'permission denied|auth|offer|refused|connect|no route|banner' | tail -n 20 || true
+    echo "=== console tail ==="; tail -n 100 "$WORK/console.log"
+    exit 1
   fi
   sleep 2
 done
