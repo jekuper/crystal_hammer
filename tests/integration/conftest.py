@@ -53,9 +53,29 @@ AGENT_LOG = "/tmp/ch-agent.log"
 AGENT_PID = "/tmp/ch-agent.pid"
 AGENT_ARGS = os.environ.get("CH_AGENT_ARGS", "")
 
+# Where the agent pins its eBPF maps/programs/links. A bpffs pin is a refcount
+# independent of the netns, so it OUTLIVES the per-test netns teardown and the
+# next agent trips over it while "Loading persistence mechanisms...". We wipe
+# it in teardown. Point this at the agent's real pin path (grep the source for
+# bpf_obj_pin / aya's map.pin(...) / PinnedLink). "" disables the wipe.
+BPF_PIN_DIR = os.environ.get("CH_BPF_PIN_DIR", "/sys/fs/bpf/crystal_hammer")
+
+# Belt-and-suspenders: give each agent its own private bpffs so nothing can
+# leak even if the wipe misses. Costs a mount namespace per agent. Set
+# CH_FRESH_BPFFS=0 to fall back to the shared host /sys/fs/bpf.
+FRESH_BPFFS = os.environ.get("CH_FRESH_BPFFS", "1") == "1"
+
 # Enter ONLY the network namespace. `ip netns exec` would also unshare the
 # mount namespace and remount /sys, which hides /sys/fs/bpf from the agent.
-IN_NS = f"nsenter --net=/var/run/netns/{NETNS}"
+# With FRESH_BPFFS we DO unshare the mount ns ourselves and remount a private
+# bpffs over /sys/fs/bpf — that gives isolation without hiding the fs.
+if FRESH_BPFFS:
+    IN_NS = (f"nsenter --net=/var/run/netns/{NETNS} "
+             f"unshare --mount -- sh -c "
+             f"'mount --make-rprivate / 2>/dev/null; "
+             f"mount -t bpf bpf /sys/fs/bpf; exec \"$@\"' --")
+else:
+    IN_NS = f"nsenter --net=/var/run/netns/{NETNS}"
 
 REQUIRED_TOOLS = ["ip", "nsenter", "setsid", "timeout", "python3"]
 
@@ -244,6 +264,49 @@ def _agent_alive(target):
     return target.sh(f"kill -0 $(cat {AGENT_PID}) 2>/dev/null").returncode == 0
 
 
+def bpf_snapshot(target, when):
+    """Dump everything that could leak between agents. Printed to the captured
+    test log (visible with -s or on failure) so a repeat hang is diagnosable
+    without another round-trip: compare the BEFORE of the failing test to the
+    AFTER of the one before it."""
+    script = f"""
+    echo '--- bpf mounts ---'; mount 2>/dev/null | grep -i bpf || echo '(none)'
+    echo '--- /sys/fs/bpf tree ---'; ls -lAR /sys/fs/bpf 2>/dev/null || echo '(missing)'
+    echo '--- pin dir ({BPF_PIN_DIR}) ---'
+    ls -lA {BPF_PIN_DIR} 2>/dev/null || echo '(absent)'
+    echo '--- bpftool prog/map (if present) ---'
+    command -v bpftool >/dev/null && {{ bpftool prog show 2>/dev/null; bpftool map show 2>/dev/null; }} || echo '(no bpftool)'
+    echo '--- stray ch-agent procs ---'; ps -eo pid,ppid,args 2>/dev/null | grep -F ch-agent | grep -v grep || echo '(none)'
+    echo '--- port {AGENT_PORT} listeners ---'; ss -ltnp 2>/dev/null | grep ':{AGENT_PORT} ' || echo '(none)'
+    """
+    print(f"\n======== BPF SNAPSHOT [{when}] on {target.name} ========")
+    print(_try(target, script).rstrip())
+    print("======== END SNAPSHOT ========")
+
+
+def _kill_agent_tree(target):
+    """Kill the whole process group, not just the recorded PID.
+
+    `setsid X & echo $!` records setsid's PID, which may differ from ch-agent's
+    and, since setsid starts a new session/group, `kill $pid` won't reach the
+    child. Killing the negative PGID gets the agent and anything it spawned."""
+    return target.sh(f"""
+        p=$(cat {AGENT_PID} 2>/dev/null) || true
+        if [ -n "$p" ]; then
+            pgid=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')
+            [ -n "$pgid" ] && kill -TERM -"$pgid" 2>/dev/null
+            kill -TERM "$p" 2>/dev/null
+            sleep 0.5
+            [ -n "$pgid" ] && kill -KILL -"$pgid" 2>/dev/null
+            kill -KILL "$p" 2>/dev/null
+        fi
+        # Sweep any ch-agent that escaped the pgid bookkeeping.
+        pkill -KILL -f '{REMOTE_DIR}/ch-agent' 2>/dev/null
+        rm -f {AGENT_PID}
+        true
+    """)
+
+
 @pytest.fixture
 def agent(target):
     """
@@ -251,6 +314,10 @@ def agent(target):
     non-loopback interface (ch-tgt). If it needs a flag to pick an interface,
     set CH_AGENT_ARGS.
     """
+    # Snapshot BEFORE we start: if a previous test leaked bpffs pins or a stray
+    # process, it shows up here as the actual cause of the coming failure.
+    bpf_snapshot(target, "before start")
+
     target.check(_NETNS_UP)
     target.check(
         f"setsid {IN_NS} {REMOTE_DIR}/ch-agent {AGENT_ARGS} "
@@ -262,16 +329,20 @@ def agent(target):
             if not _agent_alive(target):
                 fail_with_diagnostics(a, "Agent exited during startup.")
             if time.monotonic() > deadline:
+                # Snapshot again on the hang so the failure report carries the
+                # live state, not just the log that stops at "Loading...".
+                bpf_snapshot(target, "on startup timeout")
                 fail_with_diagnostics(a, "Agent failed to start within 15s.")
             time.sleep(0.3)
         yield a
     finally:
-        target.sh(
-            f"p=$(cat {AGENT_PID} 2>/dev/null); [ -n \"$p\" ] && "
-            f"{{ kill $p; sleep 0.5; kill -9 $p; }} 2>/dev/null; rm -f {AGENT_PID}; true")
-        # If the agent pins maps/programs under /sys/fs/bpf, remove that pin
-        # dir here too so state can't leak from one test into the next.
+        _kill_agent_tree(target)
         target.sh(_NETNS_DOWN)
+        # Remove the pin dir so eBPF state can't leak into the next test. This
+        # is the missing cleanup that let a stale pin block the second agent.
+        if BPF_PIN_DIR:
+            target.sh(f"rm -rf {BPF_PIN_DIR} 2>/dev/null; true")
+        bpf_snapshot(target, "after teardown")
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +366,17 @@ def fail_with_diagnostics(agent, message, *, client_stdout="", client_stderr="",
                           client_exit=None):
     """Abort with everything we know, formatted the same way for every failure."""
     t = agent.target
+    # Plain netns enter (no mount unshare) for read-only inspection.
+    netns = f"nsenter --net=/var/run/netns/{NETNS}"
     sections = [
         ("TARGET", t.name),
         ("KERNEL", _try(t, "uname -a; . /etc/os-release 2>/dev/null; echo \"$PRETTY_NAME\"")),
         ("AGENT LOG", read_agent_log(agent)),
-        (f"{TGT_IF} (attached programs)", _try(t, f"{IN_NS} ip -d link show {TGT_IF}")),
+        (f"{TGT_IF} (attached programs)", _try(t, f"{netns} ip -d link show {TGT_IF} 2>/dev/null")),
+        ("BPF PINS / PROCS",
+         _try(t, f"echo 'mounts:'; mount 2>/dev/null | grep -i bpf || echo '(none)'; "
+                 f"echo 'pin dir {BPF_PIN_DIR}:'; ls -lA {BPF_PIN_DIR} 2>/dev/null || echo '(absent)'; "
+                 f"echo 'ch-agent procs:'; ps -eo pid,ppid,pgid,args 2>/dev/null | grep -F ch-agent | grep -v grep || echo '(none)'")),
         ("DMESG (tail)", _try(t, "dmesg 2>/dev/null | tail -n 40")),
         ("CLIENT STDOUT", client_stdout),
         ("CLIENT STDERR", client_stderr),
