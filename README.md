@@ -2,10 +2,12 @@
 
 <!-- BADGES_START -->
 [![Integration Tests](https://github.com/Jekuper/crystal_hammer/actions/workflows/integration.yml/badge.svg)](https://github.com/Jekuper/crystal_hammer/actions/workflows/integration.yml)
-![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?style=flat-square&logo=ubuntu&logoColor=white)
-![Debian](https://img.shields.io/badge/Debian-A81D33?style=flat-square&logo=debian&logoColor=white)
-![Rocky Linux](https://img.shields.io/badge/Rocky%20Linux-10B981?style=flat-square&logo=rockylinux&logoColor=white)
-![openSUSE](https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white)
+![Ubuntu 22.04](https://img.shields.io/badge/Ubuntu_22.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)
+![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu_24.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)
+![Debian 12](https://img.shields.io/badge/Debian_12-A81D33?style=flat-square&logo=debian&logoColor=white)
+![Rocky Linux 9](https://img.shields.io/badge/Rocky_Linux_9-10B981?style=flat-square&logo=rockylinux&logoColor=white)
+![openSUSE Leap](https://img.shields.io/badge/openSUSE_Leap-73BA25?style=flat-square&logo=opensuse&logoColor=white)
+![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE_Tumbleweed-73BA25?style=flat-square&logo=opensuse&logoColor=white)
 ![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-0D597F?style=flat-square&logo=alpinelinux&logoColor=white)
 <!-- BADGES_END -->
 
