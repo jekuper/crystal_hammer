@@ -66,34 +66,34 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------------------
+  # Dynamic Matrix Setup
+  # Parses distros.json to determine which operating systems to test against.
+  # ---------------------------------------------------------------------------
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          JSON=$(jq -c '.' tests/integration/distros.json)
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
   # Real distros with their stock kernels, init systems, and security
   # defaults. One job = one VM; all tests run against it; jobs run in parallel.
   # "latest" URLs move; if one 404s, grab the current filename from its index.
   # ---------------------------------------------------------------------------
   distros:
     name: distro ${{ matrix.name }}
-    needs: build
+    needs: [build, prepare-matrix]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: ubuntu-22.04
-            url: https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
-          - name: ubuntu-24.04
-            url: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
-          - name: debian-12
-            url: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
-          - name: rocky-9           # "5.14" with years of RHEL backports
-            url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2
-          - name: opensuse-leap-15.6
-            url: https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2
-          - name: opensuse-tumbleweed
-            url: https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2
-          - name: alpine            # bump version as releases move
-            url: https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.2-x86_64-bios-cloudinit-r0.qcow2
-            pkgs: iproute2 util-linux
+        include: ${{ fromJSON(needs.prepare-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 

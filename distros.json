@@ -1,0 +1,38 @@
+[
+  {
+    "name": "ubuntu-22.04",
+    "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+    "badge": "![Ubuntu 22.04](https://img.shields.io/badge/Ubuntu_22.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)"
+  },
+  {
+    "name": "ubuntu-24.04",
+    "url": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+    "badge": "![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu_24.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)"
+  },
+  {
+    "name": "debian-12",
+    "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+    "badge": "![Debian 12](https://img.shields.io/badge/Debian_12-A81D33?style=flat-square&logo=debian&logoColor=white)"
+  },
+  {
+    "name": "rocky-9",
+    "url": "https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2",
+    "badge": "![Rocky Linux 9](https://img.shields.io/badge/Rocky_Linux_9-10B981?style=flat-square&logo=rockylinux&logoColor=white)"
+  },
+  {
+    "name": "opensuse-leap-15.6",
+    "url": "https://download.opensuse.org/distribution/leap/15.6/appliances/openSUSE-Leap-15.6-Minimal-VM.x86_64-Cloud.qcow2",
+    "badge": "![openSUSE Leap](https://img.shields.io/badge/openSUSE_Leap-73BA25?style=flat-square&logo=opensuse&logoColor=white)"
+  },
+  {
+    "name": "opensuse-tumbleweed",
+    "url": "https://download.opensuse.org/tumbleweed/appliances/openSUSE-Tumbleweed-Minimal-VM.x86_64-Cloud.qcow2",
+    "badge": "![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE_Tumbleweed-73BA25?style=flat-square&logo=opensuse&logoColor=white)"
+  },
+  {
+    "name": "alpine",
+    "url": "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/cloud/nocloud_alpine-3.21.2-x86_64-bios-cloudinit-r0.qcow2",
+    "pkgs": "iproute2 util-linux",
+    "badge": "![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-0D597F?style=flat-square&logo=alpinelinux&logoColor=white)"
+  }
+]

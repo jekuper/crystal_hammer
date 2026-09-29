@@ -48,3 +48,9 @@ run-all: build-all
 clean:
 	cargo clean
 	rm -f $(CLIENT_OUT) $(AGENT_OUT)
+
+# ==========================================
+# DOCS TARGET
+# ==========================================
+sync-badges:
+	python3 tests/integration/sync_badges.py

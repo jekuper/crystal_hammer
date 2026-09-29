@@ -1,11 +1,13 @@
 # Crystal Hammer
 
+<!-- BADGES_START -->
 [![Integration Tests](https://github.com/Jekuper/crystal_hammer/actions/workflows/integration.yml/badge.svg)](https://github.com/Jekuper/crystal_hammer/actions/workflows/integration.yml)
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?style=flat-square&logo=ubuntu&logoColor=white)
 ![Debian](https://img.shields.io/badge/Debian-A81D33?style=flat-square&logo=debian&logoColor=white)
 ![Rocky Linux](https://img.shields.io/badge/Rocky%20Linux-10B981?style=flat-square&logo=rockylinux&logoColor=white)
 ![openSUSE](https://img.shields.io/badge/openSUSE-73BA25?style=flat-square&logo=opensuse&logoColor=white)
 ![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-0D597F?style=flat-square&logo=alpinelinux&logoColor=white)
+<!-- BADGES_END -->
 
 Blue-team emergency access & incident-response tool. An SSH-like replacement deployed at
 competition start: authenticated invisible access, self-contained host defense, and hunt
