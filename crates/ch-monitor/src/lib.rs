@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod checks;
+pub mod audit;
 
 use serde::{Deserialize, Serialize};
 

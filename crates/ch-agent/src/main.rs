@@ -115,6 +115,19 @@ async fn main() -> Result<()> {
     }
     let store = Arc::new(ch_store::Store::open(&config.state_dir)?);
 
+    if !std::path::Path::new("/etc/pam.d/sshd").exists() || 
+       !tokio::fs::read_to_string("/etc/pam.d/sshd").await.unwrap_or_default().contains("pam_loginuid.so") {
+        tracing::warn!("pam_loginuid.so not found in sshd PAM config! AUIDs (login users) will be unset (4294967295).");
+    }
+
+    tracing::info!("Initializing audit kernel system for file tracking...");
+    let audit_engine = ch_monitor::audit::AuditEngine::new(
+        config.watchlist.clone(), 
+        config.allow_audit_daemon
+    );
+    audit_engine.start().await;
+
+
     let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());
     
     let executor = Arc::new(AgentExecutor {

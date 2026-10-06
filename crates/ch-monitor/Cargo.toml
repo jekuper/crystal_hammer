@@ -12,3 +12,10 @@ anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+libc = "0.2"
+blake3 = "1"
+netlink-packet-audit = "0.7"
+netlink-packet-core = "0.9"
+netlink-sys = { version = "0.9", features = ["tokio_socket"] }
+nix = { version = "0.31", features = ["fanotify"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }

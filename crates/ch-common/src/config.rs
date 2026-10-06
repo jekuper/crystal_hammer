@@ -20,6 +20,8 @@ pub struct AgentConfig {
     /// File paths/globs to watch for modification (SPECS 4a). Merged with built-in
     /// defaults at load time.
     pub watchlist: Vec<String>,
+    /// Allow taking over the audit daemon slot if no daemon is running
+    pub allow_audit_daemon: bool,
 }
 
 impl Default for AgentConfig {
@@ -29,6 +31,7 @@ impl Default for AgentConfig {
             listen_port: 0,
             deadman_secs: 60,
             watchlist: Vec::new(),
+            allow_audit_daemon: false,
         }
     }
 }

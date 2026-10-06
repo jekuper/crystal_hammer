@@ -493,10 +493,17 @@ name = "ch-monitor"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "blake3",
  "ch-common",
  "ch-sense",
+ "libc",
+ "netlink-packet-audit",
+ "netlink-packet-core",
+ "netlink-sys",
+ "nix 0.31.3",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -1314,6 +1321,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlink-packet-audit"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd7d24042a4e29ab3d457f25060e110bb8ddea084be759ed2147b1a8fe19f599"
+dependencies = [
+ "bytes",
+ "log",
+ "netlink-packet-core",
+ "netlink-proto",
+]
+
+[[package]]
 name = "netlink-packet-core"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1398,6 +1417,18 @@ name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases 0.2.2",
+ "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags",
  "cfg-if",
