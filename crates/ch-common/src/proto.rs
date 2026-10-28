@@ -50,6 +50,12 @@ pub struct Actor {
     pub ppid: String,
     pub uid: String,
     pub auid: String,
+    /// Username resolved from `uid` (empty if unknown).
+    #[serde(default)]
+    pub uname: String,
+    /// Login user resolved from `auid` (empty if unset/unknown).
+    #[serde(default)]
+    pub login: String,
     pub exe: String,
     pub comm: String,
     pub cmdline: String,
