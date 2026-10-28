@@ -606,10 +606,16 @@ fn format_alert(a: &ch_common::proto::Alert) -> String {
 fn format_actor(actor: &ch_common::proto::Actor) -> String {
     let mut parts = Vec::new();
     if !actor.uid.is_empty() {
-        parts.push(format!("uid={}", actor.uid));
+        match actor.uname.is_empty() {
+            true => parts.push(format!("uid={}", actor.uid)),
+            false => parts.push(format!("user={}(uid {})", actor.uname, actor.uid)),
+        }
     }
-    if !actor.auid.is_empty() {
-        parts.push(format!("login(auid)={}", actor.auid));
+    if !actor.auid.is_empty() && actor.auid != "4294967295" {
+        match actor.login.is_empty() {
+            true => parts.push(format!("login(auid)={}", actor.auid)),
+            false => parts.push(format!("login={}(auid {})", actor.login, actor.auid)),
+        }
     }
     if actor.pid != 0 {
         parts.push(format!("pid={}", actor.pid));

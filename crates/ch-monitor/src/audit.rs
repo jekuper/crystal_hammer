@@ -166,6 +166,14 @@ pub struct AuditEngine {
     rules_lock: Arc<AsyncMutex<()>>,
     /// Problems already reported at warn level; repeats drop to debug.
     warned: Arc<Mutex<HashSet<String>>>,
+    /// Cached uid -> username map (refreshed periodically) for alert attribution.
+    users: Arc<Mutex<UserCache>>,
+}
+
+#[derive(Default)]
+struct UserCache {
+    refreshed: Option<Instant>,
+    map: HashMap<String, String>,
 }
 
 impl AuditEngine {
@@ -181,7 +189,22 @@ impl AuditEngine {
             last_activity: Arc::new(Mutex::new(HashMap::new())),
             rules_lock: Arc::new(AsyncMutex::new(())),
             warned: Arc::new(Mutex::new(HashSet::new())),
+            users: Arc::new(Mutex::new(UserCache::default())),
         }
+    }
+
+    /// Resolves a uid/auid string to a username, caching /etc/passwd for a short window.
+    /// Returns empty for unset (`4294967295`) or unknown ids.
+    fn username(&self, id: &str) -> String {
+        if id.is_empty() || id == "4294967295" {
+            return String::new();
+        }
+        let mut cache = lock(&self.users);
+        if cache.refreshed.map_or(true, |t| t.elapsed() > Duration::from_secs(10)) {
+            cache.map = read_uid_name_map();
+            cache.refreshed = Some(Instant::now());
+        }
+        cache.map.get(id).cloned().unwrap_or_default()
     }
 
     /// A cloneable handle for streaming alerts and extending the watchlist at runtime.
@@ -210,6 +233,8 @@ impl AuditEngine {
             actor: Actor {
                 pid: f.pid,
                 ppid: f.ppid.clone(),
+                uname: self.username(&f.uid),
+                login: self.username(&f.auid),
                 uid: f.uid.clone(),
                 auid: f.auid.clone(),
                 exe: f.exe.clone(),
@@ -459,6 +484,8 @@ impl AuditEngine {
         let mut last_tainted: Option<String> = None;
         let mut last_modules: Option<HashSet<String>> = None;
         let mut hashes = HashState::default();
+        // Alert once on each transition into an unhealthy audit pipeline, not every tick.
+        let mut audit_healthy = true;
 
         loop {
             tokio::select! {
@@ -479,13 +506,30 @@ impl AuditEngine {
                                 if status.is_enabled() {
                                     // Full rule list diff
                                     self.apply_rules(&status).await;
+                                    audit_healthy = true;
                                 } else {
                                     error!("Audit was disabled while in use as the monitoring backend (possible tampering).");
+                                    if audit_healthy {
+                                        self.emit(Finding {
+                                            kind: "audit_pipeline",
+                                            detail: "audit subsystem disabled while in use as the monitoring backend (possible tampering)".to_owned(),
+                                            ..Finding::default()
+                                        });
+                                    }
+                                    audit_healthy = false;
                                 }
                             }
                         }
                         None if backend.uses_audit() => {
                             error!("Audit status unavailable while audit is the monitoring backend.");
+                            if audit_healthy {
+                                self.emit(Finding {
+                                    kind: "audit_pipeline",
+                                    detail: "audit status became unavailable while audit is the monitoring backend (possible tampering)".to_owned(),
+                                    ..Finding::default()
+                                });
+                            }
+                            audit_healthy = false;
                         }
                         None => {}
                     }
@@ -516,6 +560,19 @@ impl AuditEngine {
                         written.elapsed(),
                         backend
                     );
+                    // Alert once per blinded episode (warn_once keys on the message).
+                    if lock(&self.warned).insert("canary_blinded".to_owned()) {
+                        self.emit(Finding {
+                            kind: "audit_pipeline",
+                            detail: format!(
+                                "canary write was never observed via {backend:?}: the audit pipeline may be blinded"
+                            ),
+                            ..Finding::default()
+                        });
+                    }
+                } else {
+                    // Pipeline is observing again; re-arm the one-shot.
+                    lock(&self.warned).remove("canary_blinded");
                 }
             }
         }
@@ -1415,10 +1472,31 @@ fn unix_now() -> u64 {
 /// Maps a finding kind to an operator-facing severity.
 fn severity_for(kind: &str) -> AlertSeverity {
     match kind {
-        "unattributed_change" | "kernel_module" | "audit_config_change" => AlertSeverity::Critical,
+        "unattributed_change" | "kernel_module" | "audit_config_change" | "audit_pipeline" => {
+            AlertSeverity::Critical
+        }
         "file_access" | "module_list_change" => AlertSeverity::Warn,
         _ => AlertSeverity::Info,
     }
+}
+
+/// Parses /etc/passwd into a uid-string -> username map. Read directly, never via a host
+/// binary (consistent with the rest of the tool).
+fn read_uid_name_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
+        for line in content.lines() {
+            let mut fields = line.split(':');
+            if let (Some(name), Some(_pw), Some(uid)) =
+                (fields.next(), fields.next(), fields.next())
+            {
+                if !name.is_empty() && !uid.is_empty() {
+                    map.insert(uid.to_string(), name.to_string());
+                }
+            }
+        }
+    }
+    map
 }
 
 /// Reports kernel taint changes and modules appearing/disappearing in /proc/modules.
