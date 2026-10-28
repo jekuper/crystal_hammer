@@ -19,7 +19,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
-use rustyline::{Context, Helper};
+use rustyline::{Context, ExternalPrinter, Helper};
 
 use crate::proxy::Hop;
 
@@ -250,26 +250,44 @@ async fn run_operator_repl(
     }));
 
     // Subscribe to the agent's live file-tracker alerts for the life of the session. The
-    // external printer draws alerts above the prompt without mangling the current input.
-    match rl.create_external_printer() {
-        Ok(printer) => match session.channel_open_session().await {
-            Ok(channel) => {
-                if let Err(e) = channel.exec(false, b"watch stream").await {
-                    tracing::warn!("Could not start alert stream: {}", e);
-                } else {
-                    println!("[alerts] live file-tracker alerts enabled");
-                    tokio::spawn(run_alert_reader(channel, printer));
+    // external printer draws alerts above the prompt without mangling the current input;
+    // when it is unavailable (piped or headless stdin) we fall back to plain stdout so
+    // alerts still surface.
+    match session.channel_open_session().await {
+        Ok(channel) => {
+            if let Err(e) = channel.exec(false, b"watch stream").await {
+                tracing::warn!("Could not start alert stream: {}", e);
+            } else {
+                println!("[alerts] live file-tracker alerts enabled");
+                match rl.create_external_printer() {
+                    Ok(mut printer) => {
+                        tokio::spawn(run_alert_reader(channel, move |s| printer.print(s).is_ok()));
+                    }
+                    Err(_) => {
+                        tokio::spawn(run_alert_reader(channel, |s| {
+                            use std::io::Write;
+                            print!("{s}");
+                            std::io::stdout().flush().is_ok()
+                        }));
+                    }
                 }
             }
-            Err(e) => tracing::warn!("Could not open alert channel: {}", e),
-        },
-        Err(e) => tracing::warn!("Alerts will not display (external printer unavailable): {}", e),
+        }
+        Err(e) => tracing::warn!("Could not open alert channel: {}", e),
     }
 
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
     loop {
-        let readline = rl.readline("hammer> ");
+        // readline() blocks; run it on the blocking pool so the async runtime stays free
+        // to drive the live alert reader while the operator sits at the prompt.
+        let (returned_rl, readline) = tokio::task::spawn_blocking(move || {
+            let res = rl.readline("hammer> ");
+            (rl, res)
+        })
+        .await
+        .expect("readline task panicked");
+        rl = returned_rl;
         match readline {
             Ok(line) => {
                 let input = line.trim();
@@ -521,9 +539,9 @@ fn generate_nonce() -> [u8; 16] {
 
 /// Reads the agent's newline-delimited JSON alert stream and renders each alert above the
 /// operator prompt. Runs until the agent closes the channel or the session drops.
-async fn run_alert_reader<P>(mut channel: russh::Channel<russh::client::Msg>, mut printer: P)
+async fn run_alert_reader<F>(mut channel: russh::Channel<russh::client::Msg>, mut emit: F)
 where
-    P: rustyline::ExternalPrinter + Send + 'static,
+    F: FnMut(String) -> bool + Send + 'static,
 {
     use ch_common::proto::Alert;
 
@@ -540,8 +558,9 @@ where
                         continue;
                     }
                     match serde_json::from_str::<Alert>(line) {
+                        // `emit` returns false once the sink is gone (operator left).
                         Ok(alert) => {
-                            if printer.print(format_alert(&alert)).is_err() {
+                            if !emit(format_alert(&alert)) {
                                 return;
                             }
                         }
