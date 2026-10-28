@@ -1,12 +1,10 @@
 //! File-tracker control and the live alert stream.
 //!
 //! `watch stream` is the long-lived subcommand the client subscribes to on connect. It
-//! first replays recent history from the evidence log (catch-up) and then tails it, so a
-//! newly connected operator sees what they missed and then everything live. `list`, `add`,
-//! `remove` and `test` are ordinary one-shot operator commands; `add`/`remove` persist so
-//! runtime edits survive an agent restart.
-
-use std::time::Duration;
+//! first replays the engine's recent-alert ring (catch-up), then forwards live alerts, so
+//! a newly connected operator sees what they missed and then everything live. `list`,
+//! `add`, `remove` and `test` are ordinary one-shot operator commands; `add`/`remove`
+//! persist (when a store is present) so runtime edits survive an agent restart.
 
 use async_trait::async_trait;
 use ch_common::Result;
@@ -15,12 +13,6 @@ use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, AgentCommandContext, ClientCommand, ClientCommandContext};
-
-/// How many recent evidence records a connecting operator is caught up on.
-const CATCHUP: u64 = 50;
-/// How often the live tail polls the evidence log for new records.
-const TAIL_POLL: Duration = Duration::from_millis(200);
-
 pub struct WatchAgentCommand {}
 
 impl WatchAgentCommand {
@@ -29,50 +21,40 @@ impl WatchAgentCommand {
     }
 
     async fn stream(&self, mut ctx: AgentCommandContext) -> Result<()> {
-        match ctx.store.clone() {
-            // With a store: catch the operator up on recent history, then follow the log.
-            // Polling keeps this race-free: the cursor only moves past records actually
-            // read, so nothing is dropped or doubled.
-            Some(store) => {
-                let latest = store.latest_cursor().unwrap_or(0);
-                let mut cursor = latest.saturating_sub(CATCHUP);
-                loop {
-                    for rec in store.since(cursor, 512).unwrap_or_default() {
-                        cursor = rec.cursor;
-                        if rec.kind != "alert" {
-                            continue;
-                        }
-                        if !write_line(&mut ctx.stdout, &serde_json::to_string(&rec.body).unwrap_or_default()).await {
-                            return Ok(());
-                        }
-                    }
-                    tokio::time::sleep(TAIL_POLL).await;
-                }
+        use tokio::sync::broadcast::error::RecvError;
+
+        // Subscribe first so any alert published between the catch-up snapshot and the live
+        // loop is captured; the per-alert sequence number then dedups the overlap exactly.
+        let mut live = ctx.audit.subscribe();
+        let mut last_seq = 0u64;
+        for (seq, alert) in ctx.audit.recent() {
+            last_seq = seq;
+            if !write_alert(&mut ctx.stdout, &alert).await {
+                return Ok(());
             }
-            // Degraded (no store): no evidence log to tail or catch up on, so forward live
-            // alerts straight from the engine for the life of the connection.
-            None => {
-                use tokio::sync::broadcast::error::RecvError;
-                let mut rx = ctx.audit.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(alert) => {
-                            let line = serde_json::to_string(&alert).unwrap_or_default();
-                            if !write_line(&mut ctx.stdout, &line).await {
-                                return Ok(());
-                            }
-                        }
-                        Err(RecvError::Lagged(_)) => continue,
-                        Err(RecvError::Closed) => return Ok(()),
+        }
+
+        loop {
+            match live.recv().await {
+                Ok((seq, alert)) => {
+                    if seq <= last_seq {
+                        continue; // already delivered in the catch-up snapshot
+                    }
+                    last_seq = seq;
+                    if !write_alert(&mut ctx.stdout, &alert).await {
+                        return Ok(());
                     }
                 }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return Ok(()),
             }
         }
     }
 }
 
-/// Writes one NDJSON line and flushes. Returns false once the operator disconnected.
-async fn write_line(w: &mut (impl AsyncWriteExt + Unpin), line: &str) -> bool {
+/// Writes one alert as an NDJSON line and flushes. Returns false once the operator left.
+async fn write_alert(w: &mut (impl AsyncWriteExt + Unpin), alert: &ch_common::proto::Alert) -> bool {
+    let line = serde_json::to_string(alert).unwrap_or_default();
     w.write_all(line.as_bytes()).await.is_ok()
         && w.write_all(b"\n").await.is_ok()
         && w.flush().await.is_ok()

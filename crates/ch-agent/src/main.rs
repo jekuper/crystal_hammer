@@ -213,13 +213,13 @@ async fn main() -> Result<()> {
 /// it runs on the blocking pool so it never stalls an async worker.
 fn spawn_evidence_writer(
     store: Arc<ch_store::Store>,
-    mut alerts: tokio::sync::broadcast::Receiver<ch_common::proto::Alert>,
+    mut alerts: tokio::sync::broadcast::Receiver<ch_monitor::audit::SeqAlert>,
 ) {
     use tokio::sync::broadcast::error::RecvError;
     tokio::spawn(async move {
         loop {
             match alerts.recv().await {
-                Ok(alert) => {
+                Ok((_seq, alert)) => {
                     let store = store.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         match serde_json::to_value(&alert) {

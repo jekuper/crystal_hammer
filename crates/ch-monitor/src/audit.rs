@@ -5,10 +5,11 @@
 //! `netlink-packet-audit`, fanotify through `nix`, so it builds under
 //! `#![forbid(unsafe_code)]`.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock as RwLockStd, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
@@ -91,20 +92,82 @@ impl AuditStatus {
 /// Capacity of the live alert broadcast. A slow operator connection that falls this far
 /// behind gets a Lagged signal rather than stalling the engine.
 const ALERT_CHANNEL_CAP: usize = 1024;
+/// How many recent alerts the in-memory ring keeps so a connecting operator catches up on
+/// what they missed, even with no durable store.
+const ALERT_RING_CAP: usize = 256;
 
-/// Cheap, cloneable handle onto a running engine: lets commands stream alerts and extend
-/// the tracked-file list at runtime without touching the engine internals.
+/// One delivered alert, tagged with a per-run monotonic sequence number. The sequence lets
+/// a stream dedup the catch-up snapshot against the live tail with no race.
+pub type SeqAlert = (u64, Alert);
+
+/// The alert fan-out: a broadcast to live subscribers plus a bounded ring of recent alerts
+/// for connect-time catch-up. Cloneable; every clone shares the same channel, ring and
+/// sequence counter.
+#[derive(Clone)]
+struct AlertBus {
+    tx: broadcast::Sender<SeqAlert>,
+    seq: Arc<AtomicU64>,
+    ring: Arc<Mutex<VecDeque<SeqAlert>>>,
+}
+
+impl AlertBus {
+    fn new() -> Self {
+        let (tx, _) = broadcast::channel(ALERT_CHANNEL_CAP);
+        AlertBus {
+            tx,
+            seq: Arc::new(AtomicU64::new(0)),
+            ring: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Record the alert in the ring and broadcast it. Returns its sequence number.
+    fn publish(&self, alert: Alert) -> u64 {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        {
+            let mut ring = lock(&self.ring);
+            ring.push_back((seq, alert.clone()));
+            while ring.len() > ALERT_RING_CAP {
+                ring.pop_front();
+            }
+        }
+        let _ = self.tx.send((seq, alert));
+        seq
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<SeqAlert> {
+        self.tx.subscribe()
+    }
+
+    fn snapshot(&self) -> Vec<SeqAlert> {
+        lock(&self.ring).iter().cloned().collect()
+    }
+}
+
+/// Cheap, cloneable handle onto a running engine: lets commands stream alerts, inject
+/// alerts from other subsystems, and extend the tracked-file list at runtime without
+/// touching the engine internals.
 #[derive(Clone)]
 pub struct AuditHandle {
-    alerts: broadcast::Sender<Alert>,
+    bus: AlertBus,
     watchlist: Arc<RwLockStd<Vec<String>>>,
 }
 
 impl AuditHandle {
-    /// Subscribe to the live alert stream. Each subscriber gets every alert sent after it
-    /// subscribed.
-    pub fn subscribe(&self) -> broadcast::Receiver<Alert> {
-        self.alerts.subscribe()
+    /// Subscribe to the live alert stream (each item carries its sequence number). A
+    /// subscriber sees every alert published after it subscribed.
+    pub fn subscribe(&self) -> broadcast::Receiver<SeqAlert> {
+        self.bus.subscribe()
+    }
+
+    /// Snapshot of the recent-alert ring for connect-time catch-up.
+    pub fn recent(&self) -> Vec<SeqAlert> {
+        self.bus.snapshot()
+    }
+
+    /// Publish an alert from outside the file-tracker (hunt checks, auth monitor, response
+    /// commands, ...). This is the single seam that routes any signal to live operators.
+    pub fn publish(&self, alert: Alert) -> u64 {
+        self.bus.publish(alert)
     }
 
     /// Current tracked paths.
@@ -140,7 +203,7 @@ impl AuditHandle {
         } else {
             detail.to_string()
         };
-        let _ = self.alerts.send(Alert {
+        self.bus.publish(Alert {
             kind: "test".to_string(),
             severity: AlertSeverity::Warn,
             path: String::new(),
@@ -154,7 +217,7 @@ impl AuditHandle {
 #[derive(Clone)]
 pub struct AuditEngine {
     watchlist: Arc<RwLockStd<Vec<String>>>,
-    alerts: broadcast::Sender<Alert>,
+    bus: AlertBus,
     allow_daemon: bool,
     current_backend: Arc<RwLock<ActiveBackend>>,
     canary_path: String,
@@ -178,10 +241,9 @@ struct UserCache {
 
 impl AuditEngine {
     pub fn new(watchlist: Vec<String>, allow_daemon: bool) -> Self {
-        let (alerts, _) = broadcast::channel(ALERT_CHANNEL_CAP);
         Self {
             watchlist: Arc::new(RwLockStd::new(watchlist)),
-            alerts,
+            bus: AlertBus::new(),
             allow_daemon,
             current_backend: Arc::new(RwLock::new(ActiveBackend::None)),
             canary_path: format!("{CANARY_DIR}/.canary"),
@@ -210,7 +272,7 @@ impl AuditEngine {
     /// A cloneable handle for streaming alerts and extending the watchlist at runtime.
     pub fn handle(&self) -> AuditHandle {
         AuditHandle {
-            alerts: self.alerts.clone(),
+            bus: self.bus.clone(),
             watchlist: self.watchlist.clone(),
         }
     }
@@ -243,7 +305,7 @@ impl AuditEngine {
             },
             unix_time: unix_now(),
         };
-        let _ = self.alerts.send(alert);
+        self.bus.publish(alert);
     }
 
     /// Emits a finding to the evidence log and the live alert stream in one step.
