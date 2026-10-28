@@ -27,6 +27,30 @@ def test_kill_terminates_process(agent):
                               client_stdout=out, client_stderr=err)
 
 
+def test_service_invalid_action(agent):
+    """An unknown action is rejected before any init tool is touched."""
+    out, err, code = run_client(agent, b"service frobnicate somesvc\nexit\n")
+    if code != 0:
+        fail_with_diagnostics(agent, "service command failed",
+                              client_stdout=out, client_stderr=err, client_exit=code)
+    if "unknown action" not in out:
+        fail_with_diagnostics(agent, "service did not reject an invalid action",
+                              client_stdout=out, client_stderr=err)
+
+
+def test_service_status_invokes_init(agent):
+    """`service status` detects the host init system and drives it (the report echoes the
+    init command line). Works whether the distro runs systemd, OpenRC, or SysV."""
+    out, err, code = run_client(
+        agent, b"service status definitely-not-a-real-service-xyz\nexit\n")
+    if code != 0:
+        fail_with_diagnostics(agent, "service status failed",
+                              client_stdout=out, client_stderr=err, client_exit=code)
+    if not any(tool in out for tool in ("systemctl", "rc-service", "service ")):
+        fail_with_diagnostics(agent, "service status did not invoke a known init backend",
+                              client_stdout=out, client_stderr=err)
+
+
 def test_kick_refuses_root(agent):
     """`kick` must refuse uid 0: killing every root process would take down the host and
     the agent itself."""
