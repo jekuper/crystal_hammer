@@ -62,6 +62,27 @@ def test_live_alert_channel_delivers(agent):
                               client_stdout=out)
 
 
+def test_alert_catch_up_on_connect(agent):
+    """Persistence + catch-up: one operator triggers an alert and leaves; a second
+    operator connecting afterward is caught up on it from the evidence log, unprompted."""
+    out, err, code = run_client(agent, b"watch test CATCHUP_PROOF_123\nexit\n")
+    if code != 0:
+        fail_with_diagnostics(agent, "watch test failed",
+                              client_stdout=out, client_stderr=err, client_exit=code)
+
+    # Fresh session, issues no commands, just listens briefly.
+    script = (
+        f"cd {REMOTE_DIR} && rm -f /tmp/ch-cout && "
+        + _persistent_client("", 4)
+        + " >/tmp/ch-cout 2>&1; cat /tmp/ch-cout"
+    )
+    out2 = agent.target.sh(script, timeout=40).stdout.decode(errors="replace")
+    if "CATCHUP_PROOF_123" not in out2:
+        fail_with_diagnostics(
+            agent, "a newly connected operator was not caught up on the missed alert",
+            client_stdout=out2)
+
+
 def test_live_alert_on_tracked_file_change(agent):
     """Full intrusion simulation: operator connected, a separate root shell tampers
     with a tracked file, and the alert naming the file appears in the operator's
