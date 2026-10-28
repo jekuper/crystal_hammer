@@ -9,11 +9,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock as RwLockStd, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context as _};
-use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
+use ch_common::proto::{Actor, Alert, AlertSeverity};
+use tokio::sync::{broadcast, mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
 
@@ -87,9 +88,46 @@ impl AuditStatus {
     }
 }
 
+/// Capacity of the live alert broadcast. A slow operator connection that falls this far
+/// behind gets a Lagged signal rather than stalling the engine.
+const ALERT_CHANNEL_CAP: usize = 1024;
+
+/// Cheap, cloneable handle onto a running engine: lets commands stream alerts and extend
+/// the tracked-file list at runtime without touching the engine internals.
+#[derive(Clone)]
+pub struct AuditHandle {
+    alerts: broadcast::Sender<Alert>,
+    watchlist: Arc<RwLockStd<Vec<String>>>,
+}
+
+impl AuditHandle {
+    /// Subscribe to the live alert stream. Each subscriber gets every alert sent after it
+    /// subscribed.
+    pub fn subscribe(&self) -> broadcast::Receiver<Alert> {
+        self.alerts.subscribe()
+    }
+
+    /// Current tracked paths.
+    pub fn list(&self) -> Vec<String> {
+        lock_r(&self.watchlist).clone()
+    }
+
+    /// Start tracking `path`. Returns false if it was already tracked. Audit-backend rules
+    /// pick the new path up on the next sync (within ~5s); fanotify re-marks on its tick.
+    pub fn add_watch(&self, path: String) -> bool {
+        let mut list = lock_w(&self.watchlist);
+        if list.iter().any(|p| p == &path) {
+            return false;
+        }
+        list.push(path);
+        true
+    }
+}
+
 #[derive(Clone)]
 pub struct AuditEngine {
-    watchlist: Vec<String>,
+    watchlist: Arc<RwLockStd<Vec<String>>>,
+    alerts: broadcast::Sender<Alert>,
     allow_daemon: bool,
     current_backend: Arc<RwLock<ActiveBackend>>,
     canary_path: String,
@@ -105,8 +143,10 @@ pub struct AuditEngine {
 
 impl AuditEngine {
     pub fn new(watchlist: Vec<String>, allow_daemon: bool) -> Self {
+        let (alerts, _) = broadcast::channel(ALERT_CHANNEL_CAP);
         Self {
-            watchlist,
+            watchlist: Arc::new(RwLockStd::new(watchlist)),
+            alerts,
             allow_daemon,
             current_backend: Arc::new(RwLock::new(ActiveBackend::None)),
             canary_path: format!("{CANARY_DIR}/.canary"),
@@ -115,6 +155,49 @@ impl AuditEngine {
             rules_lock: Arc::new(AsyncMutex::new(())),
             warned: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// A cloneable handle for streaming alerts and extending the watchlist at runtime.
+    pub fn handle(&self) -> AuditHandle {
+        AuditHandle {
+            alerts: self.alerts.clone(),
+            watchlist: self.watchlist.clone(),
+        }
+    }
+
+    /// Snapshot of the tracked paths. Taken fresh by every loop so runtime additions are
+    /// picked up on the next pass.
+    fn watchlist(&self) -> Vec<String> {
+        lock_r(&self.watchlist).clone()
+    }
+
+    /// Converts an internal finding into a wire alert and publishes it to live operators.
+    /// A send error just means nobody is connected; findings still go to the evidence log
+    /// via `Finding::emit`.
+    fn publish(&self, f: &Finding) {
+        let alert = Alert {
+            kind: f.kind.to_string(),
+            severity: severity_for(f.kind),
+            path: f.path.clone(),
+            detail: f.detail.clone(),
+            actor: Actor {
+                pid: f.pid,
+                ppid: f.ppid.clone(),
+                uid: f.uid.clone(),
+                auid: f.auid.clone(),
+                exe: f.exe.clone(),
+                comm: f.comm.clone(),
+                cmdline: f.cmdline.clone(),
+            },
+            unix_time: unix_now(),
+        };
+        let _ = self.alerts.send(alert);
+    }
+
+    /// Emits a finding to the evidence log and the live alert stream in one step.
+    fn emit(&self, f: Finding) {
+        f.emit();
+        self.publish(&f);
     }
 
     /// Entry point for the monitoring engine. Spawns the negotiation and integrity loops.
@@ -161,9 +244,9 @@ impl AuditEngine {
     fn note_activity(&self, paths: &[String]) {
         let now = Instant::now();
         let mut activity = lock(&self.last_activity);
-        for watch in &self.watchlist {
-            if paths.iter().any(|p| Path::new(p).starts_with(watch)) {
-                activity.insert(watch.clone(), now);
+        for watch in self.watchlist() {
+            if paths.iter().any(|p| Path::new(p).starts_with(&watch)) {
+                activity.insert(watch, now);
             }
         }
     }
@@ -279,7 +362,7 @@ impl AuditEngine {
         let mut rules = Vec::new();
 
         // 1. File watches (the canary is watched too, otherwise writing it proves nothing)
-        for path in self.watchlist.iter().chain(std::iter::once(&self.canary_path)) {
+        for path in self.watchlist().iter().chain(std::iter::once(&self.canary_path)) {
             rules.push(format!("-w {path} -p wa -k {AUDIT_KEY}"));
             // Add read watches for secrets
             if is_secret(path) {
@@ -384,7 +467,7 @@ impl AuditEngine {
                     self.canary_tick(&mut last_canary_write).await;
                 }
                 _ = module_ticker.tick() => {
-                    check_modules(&mut last_tainted, &mut last_modules).await;
+                    self.check_modules(&mut last_tainted, &mut last_modules).await;
                 }
                 _ = hash_ticker.tick() => {
                     // Periodic hash rescan of watched paths
@@ -438,7 +521,7 @@ impl AuditEngine {
     /// audit/fanotify event accounts for ("unattributed change"). Returns those paths.
     async fn rescan_hashes(&self, state: &mut HashState) -> Vec<PathBuf> {
         let scan_started = Instant::now();
-        let watchlist = self.watchlist.clone();
+        let watchlist = self.watchlist();
         let current = match tokio::task::spawn_blocking(move || hash_watchlist(&watchlist)).await {
             Ok(current) => current,
             Err(e) => {
@@ -469,13 +552,12 @@ impl AuditEngine {
                     debug!("{} {} (accounted for by monitored activity)", path.display(), change);
                     continue;
                 }
-                Finding {
+                self.emit(Finding {
                     kind: "unattributed_change",
                     path: path.display().to_string(),
                     detail: format!("file {change} with no matching file-access event"),
                     ..Finding::default()
-                }
-                .emit();
+                });
                 unattributed.push(path.to_path_buf());
             }
         } else {
@@ -716,32 +798,55 @@ impl AuditEngine {
         )
         .context("fanotify_init (needs CAP_SYS_ADMIN)")?;
 
-        let mut marked = 0usize;
-        for path in &self.watchlist {
-            let p = Path::new(path);
-            let mut mask = MaskFlags::FAN_MODIFY | MaskFlags::FAN_CLOSE_WRITE;
-            if is_secret(path) {
-                mask |= MaskFlags::FAN_OPEN;
+        // Adds FAN marks for any tracked path not already marked. Called once up front and
+        // again on a tick so paths added at runtime start being watched.
+        let mark_new = |fan: &Fanotify, already: &mut HashSet<String>| -> usize {
+            let mut added = 0usize;
+            for path in self.watchlist() {
+                if already.contains(&path) {
+                    continue;
+                }
+                let p = Path::new(&path);
+                let mut mask = MaskFlags::FAN_MODIFY | MaskFlags::FAN_CLOSE_WRITE;
+                if is_secret(&path) {
+                    mask |= MaskFlags::FAN_OPEN;
+                }
+                if p.is_dir() {
+                    mask |= MaskFlags::FAN_EVENT_ON_CHILD;
+                }
+                match fan.mark(MarkFlags::FAN_MARK_ADD, mask, AT_FDCWD, Some(p)) {
+                    Ok(()) => {
+                        already.insert(path);
+                        added += 1;
+                    }
+                    Err(e) => self.warn_once(
+                        &format!("fanotify:{path}"),
+                        &format!("fanotify_mark failed for {path}: {e}"),
+                    ),
+                }
             }
-            if p.is_dir() {
-                mask |= MaskFlags::FAN_EVENT_ON_CHILD;
-            }
-            match fan.mark(MarkFlags::FAN_MARK_ADD, mask, AT_FDCWD, Some(p)) {
-                Ok(()) => marked += 1,
-                Err(e) => self.warn_once(
-                    &format!("fanotify:{path}"),
-                    &format!("fanotify_mark failed for {path}: {e}"),
-                ),
-            }
-        }
-        if marked == 0 {
+            added
+        };
+
+        let mut marked: HashSet<String> = HashSet::new();
+        if mark_new(&fan, &mut marked) == 0 {
             bail!("no watchlist path could be marked with fanotify");
         }
-        info!("fanotify watching {} path(s).", marked);
+        info!("fanotify watching {} path(s).", marked.len());
 
         let fan = AsyncFd::with_interest(fan, Interest::READABLE)?;
+        let mut remark = ticker(Duration::from_secs(5));
         loop {
-            let mut guard = fan.readable().await?;
+            let mut guard = tokio::select! {
+                res = fan.readable() => res?,
+                _ = remark.tick() => {
+                    let added = mark_new(fan.get_ref(), &mut marked);
+                    if added > 0 {
+                        info!("fanotify now watching {} path(s).", marked.len());
+                    }
+                    continue;
+                }
+            };
             let events = match guard.try_io(|inner| inner.get_ref().read_events().map_err(io::Error::from)) {
                 Ok(result) => result?,
                 Err(_would_block) => continue,
@@ -1026,7 +1131,7 @@ impl EventProcessor {
             return;
         }
         self.recent.insert(key, Instant::now());
-        finding.emit();
+        self.engine.emit(finding);
     }
 }
 
@@ -1265,11 +1370,37 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_r<T>(m: &RwLockStd<T>) -> RwLockReadGuard<'_, T> {
+    m.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_w<T>(m: &RwLockStd<T>) -> RwLockWriteGuard<'_, T> {
+    m.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Maps a finding kind to an operator-facing severity.
+fn severity_for(kind: &str) -> AlertSeverity {
+    match kind {
+        "unattributed_change" | "kernel_module" | "audit_config_change" => AlertSeverity::Critical,
+        "file_access" | "module_list_change" => AlertSeverity::Warn,
+        _ => AlertSeverity::Info,
+    }
+}
+
 /// Reports kernel taint changes and modules appearing/disappearing in /proc/modules.
-async fn check_modules(
-    last_tainted: &mut Option<String>,
-    last_modules: &mut Option<HashSet<String>>,
-) {
+impl AuditEngine {
+    async fn check_modules(
+        &self,
+        last_tainted: &mut Option<String>,
+        last_modules: &mut Option<HashSet<String>>,
+    ) {
     if let Ok(tainted) = tokio::fs::read_to_string("/proc/sys/kernel/tainted").await {
         let tainted = tainted.trim().to_owned();
         if last_tainted.as_deref() != Some(tainted.as_str()) {
@@ -1288,25 +1419,24 @@ async fn check_modules(
             .collect();
         if let Some(prev) = last_modules.as_ref() {
             for m in current.difference(prev) {
-                Finding {
+                self.emit(Finding {
                     kind: "module_list_change",
                     path: m.clone(),
                     detail: "kernel module appeared in /proc/modules".to_owned(),
                     ..Finding::default()
-                }
-                .emit();
+                });
             }
             for m in prev.difference(&current) {
-                Finding {
+                self.emit(Finding {
                     kind: "module_list_change",
                     path: m.clone(),
                     detail: "kernel module disappeared from /proc/modules".to_owned(),
                     ..Finding::default()
-                }
-                .emit();
+                });
             }
         }
         *last_modules = Some(current);
+    }
     }
 }
 

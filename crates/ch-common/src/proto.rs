@@ -34,6 +34,39 @@ pub enum Event {
 }
 
 
+/// Severity of a file-tracker alert, used for client-side alert routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlertSeverity {
+    Info,
+    Warn,
+    Critical,
+}
+
+/// Who touched a tracked file. The blue team reacts on identity first, so this is the
+/// point of the whole feature: uid/auid tell apart a service from a logged-in operator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Actor {
+    pub pid: u32,
+    pub ppid: String,
+    pub uid: String,
+    pub auid: String,
+    pub exe: String,
+    pub comm: String,
+    pub cmdline: String,
+}
+
+/// A file-tracker alert: who changed what, when. Streamed live to connected operators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Alert {
+    pub kind: String,
+    pub severity: AlertSeverity,
+    pub path: String,
+    pub detail: String,
+    pub actor: Actor,
+    /// Seconds since the Unix epoch, as seen by the agent.
+    pub unix_time: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandEvent {
     /// Progress update for file transfers or long-running sweeps

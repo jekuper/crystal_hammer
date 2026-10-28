@@ -24,13 +24,33 @@ pub struct AgentConfig {
     pub allow_audit_daemon: bool,
 }
 
+/// Files worth tracking on a typical box before any operator customization. More paths
+/// can be added at runtime via the `watch add` command.
+pub fn default_watchlist() -> Vec<String> {
+    [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/etc/sudoers.d",
+        "/etc/ssh/sshd_config",
+        "/etc/ssh/sshd_config.d",
+        "/etc/crontab",
+        "/etc/cron.d",
+        "/etc/nginx/nginx.conf",
+        "/etc/nginx/conf.d",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         AgentConfig {
             state_dir: PathBuf::from("/var/lib/crystal_hammer"),
             listen_port: 0,
             deadman_secs: 60,
-            watchlist: Vec::new(),
+            watchlist: default_watchlist(),
             allow_audit_daemon: false,
         }
     }
