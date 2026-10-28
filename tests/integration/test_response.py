@@ -51,6 +51,42 @@ def test_service_status_invokes_init(agent):
                               client_stdout=out, client_stderr=err)
 
 
+def test_rotate_unknown_user(agent):
+    """Rotating a user with no shadow entry is reported, not silently done."""
+    out, err, code = run_client(agent, b"rotate ghost_user_xyz\nexit\n")
+    if code != 0:
+        fail_with_diagnostics(agent, "rotate command failed",
+                              client_stdout=out, client_stderr=err, client_exit=code)
+    if "user not found" not in out:
+        fail_with_diagnostics(agent, "rotate did not report an unknown user",
+                              client_stdout=out, client_stderr=err)
+
+
+def test_rotate_locks_and_backs_up(agent):
+    """Rotate a throwaway shadow entry: its password is locked, last-change is zeroed, and
+    /etc/shadow is backed up. Uses an injected test entry so no real account is touched."""
+    agent.target.check("echo 'chrot:$6$abc$def:19000:0:99999:7:::' >> /etc/shadow")
+
+    out, err, code = run_client(agent, b"rotate chrot\nexit\n")
+    if code != 0:
+        fail_with_diagnostics(agent, "rotate command failed",
+                              client_stdout=out, client_stderr=err, client_exit=code)
+    if "rotated chrot" not in out or "backed up" not in out:
+        fail_with_diagnostics(agent, "rotate did not report locking + backup",
+                              client_stdout=out, client_stderr=err)
+
+    line = agent.target.check("grep '^chrot:' /etc/shadow").strip()
+    fields = line.split(":")
+    if not fields[1].startswith("!"):
+        fail_with_diagnostics(agent, f"password not locked: {line}", client_stdout=out)
+    if fields[2] != "0":
+        fail_with_diagnostics(agent, f"last-change not reset: {line}", client_stdout=out)
+    # a shadow backup was created
+    backups = agent.target.check("ls /etc/shadow.ch.bak.* 2>/dev/null | wc -l").strip()
+    if backups == "0":
+        fail_with_diagnostics(agent, "no /etc/shadow backup was created", client_stdout=out)
+
+
 def test_kick_refuses_root(agent):
     """`kick` must refuse uid 0: killing every root process would take down the host and
     the agent itself."""
