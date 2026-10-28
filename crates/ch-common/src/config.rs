@@ -24,20 +24,96 @@ pub struct AgentConfig {
     pub allow_audit_daemon: bool,
 }
 
-/// Files worth tracking on a typical box before any operator customization. More paths
-/// can be added at runtime via the `watch add` command.
+/// Files and directories worth tracking on a typical box before any operator
+/// customization. Missing paths are skipped by the engine, so this can be broad. More can
+/// be added at runtime via `watch add`; per-user SSH key dirs are added by the agent.
+///
+/// Covers the common blue-team service stack (Linux only): directories are watched because
+/// the integrity rescan walks them recursively.
 pub fn default_watchlist() -> Vec<String> {
     [
+        // Identity, auth, privilege
         "/etc/passwd",
         "/etc/shadow",
+        "/etc/group",
+        "/etc/gshadow",
         "/etc/sudoers",
         "/etc/sudoers.d",
-        "/etc/ssh/sshd_config",
-        "/etc/ssh/sshd_config.d",
+        "/etc/pam.d",
+        "/etc/login.defs",
+        "/etc/security",
+        "/etc/ssh",
+        "/etc/krb5.conf",
+        "/etc/krb5.keytab",
+        // Scheduled execution and boot/persistence surfaces
         "/etc/crontab",
         "/etc/cron.d",
-        "/etc/nginx/nginx.conf",
-        "/etc/nginx/conf.d",
+        "/etc/cron.hourly",
+        "/etc/cron.daily",
+        "/etc/cron.weekly",
+        "/etc/cron.monthly",
+        "/var/spool/cron",
+        "/etc/systemd/system",
+        "/etc/rc.local",
+        "/etc/profile",
+        "/etc/profile.d",
+        "/etc/bash.bashrc",
+        "/etc/ld.so.preload",
+        "/etc/modules",
+        "/etc/modules-load.d",
+        "/etc/modprobe.d",
+        // System / network basics
+        "/etc/hosts",
+        "/etc/hostname",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+        "/etc/fstab",
+        // Package sources (Debian/Ubuntu, RHEL/Rocky, Alpine, SUSE)
+        "/etc/apt/sources.list",
+        "/etc/apt/sources.list.d",
+        "/etc/yum.repos.d",
+        "/etc/apk/repositories",
+        "/etc/zypp/repos.d",
+        // Centralized logging / Graylog
+        "/etc/rsyslog.conf",
+        "/etc/rsyslog.d",
+        "/etc/syslog-ng",
+        "/etc/graylog",
+        // Certificate authority / TLS material
+        "/etc/pki",
+        "/etc/ssl",
+        "/etc/letsencrypt",
+        "/etc/step",
+        "/etc/easy-rsa",
+        // Containers / orchestration (Docker, containerd, Kubernetes, CNI)
+        "/etc/docker",
+        "/etc/containerd",
+        "/etc/crio",
+        "/etc/kubernetes",
+        "/etc/cni/net.d",
+        // Config management
+        "/etc/ansible",
+        // Databases (MySQL/MariaDB, PostgreSQL)
+        "/etc/my.cnf",
+        "/etc/my.cnf.d",
+        "/etc/mysql",
+        "/etc/postgresql",
+        // Web / proxy servers and app frontends
+        "/etc/nginx",
+        "/etc/apache2",
+        "/etc/httpd",
+        "/etc/haproxy",
+        "/etc/traefik",
+        "/var/www/html/wp-config.php",
+        // Access / runtime security
+        "/etc/teleport.yaml",
+        "/etc/falco",
+        // Observability
+        "/etc/prometheus",
+        "/etc/alertmanager",
+        "/etc/grafana",
+        "/etc/influxdb",
+        "/etc/influxdb2",
     ]
     .iter()
     .map(|s| s.to_string())
