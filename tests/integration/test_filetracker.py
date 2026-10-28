@@ -21,23 +21,34 @@ from conftest import (
 def _listen(agent, *, marker, feed="", pre="", trigger="", settle=0, poll=40):
     """Run a client that stays connected, optionally fire `trigger` (a shell snippet) once
     the live subscription is up and `settle` seconds have passed, and poll the client's
-    captured stdout up to `poll` seconds for `marker`. Returns the captured output."""
+    captured stdout up to `poll` seconds for `marker`. Returns the captured output.
+
+    The client's stdin is a FIFO held open by fd 7 (opened read-write so neither side
+    blocks); closing it sends EOF so the client exits cleanly. This avoids leaving a pipe
+    left-side (e.g. a `sleep`) holding the ssh session's stderr open, which would hang the
+    remote command until it timed out."""
     loops = int(poll / 0.5)
     script = f"""
 cd {REMOTE_DIR}
-rm -f /tmp/ch-cout
+rm -f /tmp/ch-cout /tmp/ch-fin
+mkfifo /tmp/ch-fin
 {pre}
-{{ printf {feed!r}; sleep 300; }} | ./client --host {TGT_IP} --port {AGENT_PORT} >/tmp/ch-cout 2>&1 &
+./client --host {TGT_IP} --port {AGENT_PORT} </tmp/ch-fin >/tmp/ch-cout 2>&1 &
 CL=$!
+exec 7<>/tmp/ch-fin
+printf {feed!r} >&7
 # Wait until the live alert subscription is actually up before triggering anything.
 for i in $(seq 1 60); do grep -q 'alerts] live' /tmp/ch-cout 2>/dev/null && break; sleep 0.5; done
 sleep {settle}
 {trigger}
 for i in $(seq 1 {loops}); do grep -q {marker!r} /tmp/ch-cout 2>/dev/null && break; sleep 0.5; done
+exec 7>&-
 kill $CL 2>/dev/null
+wait $CL 2>/dev/null
 cat /tmp/ch-cout
+rm -f /tmp/ch-fin
 """
-    return agent.target.sh(script, timeout=poll + 90).stdout.decode(errors="replace")
+    return agent.target.sh(script, timeout=poll + 60).stdout.decode(errors="replace")
 
 
 def test_watch_list_shows_defaults(agent):
