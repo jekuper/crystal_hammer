@@ -15,8 +15,6 @@ pub struct AgentConfig {
     pub state_dir: PathBuf,
     /// Port the SPA-gated listener binds once knocked open.
     pub listen_port: u16,
-    /// Dead-man's-switch auto-revert window, seconds (SPECS section 1).
-    pub deadman_secs: u64,
     /// File paths/globs to watch for modification (SPECS 4a). Merged with built-in
     /// defaults at load time.
     pub watchlist: Vec<String>,
@@ -125,7 +123,6 @@ impl Default for AgentConfig {
         AgentConfig {
             state_dir: PathBuf::from("/var/lib/crystal_hammer"),
             listen_port: 0,
-            deadman_secs: 60,
             watchlist: default_watchlist(),
             allow_audit_daemon: false,
         }
