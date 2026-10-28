@@ -10,6 +10,7 @@ use rustyline::completion::{FilenameCompleter, Pair};
 use crate::{clear_command::ClearClientCommand, download_command::{DownloadAgentCommand, DownloadClientCommand}, help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, persistence_command::{PersistenceAgentCommand, PersistenceClientCommand}, restart_command::{RestartAgentCommand, RestartClientCommand}, shell_command::ShellClientCommand, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}, upload_exec_command::{UploadExecAgentCommand, UploadExecClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 use crate::watch_command::{WatchAgentCommand, WatchClientCommand};
+use crate::response_command::{KickAgentCommand, KickClientCommand, KillAgentCommand, KillClientCommand};
 
 #[async_trait]
 pub trait AgentCommand: Send + Sync {
@@ -58,6 +59,8 @@ impl AgentCommandRegistry {
         r.register(Box::new(UploadExecAgentCommand::new()));
         r.register(Box::new(DownloadAgentCommand::new()));
         r.register(Box::new(WatchAgentCommand::new()));
+        r.register(Box::new(KillAgentCommand::new()));
+        r.register(Box::new(KickAgentCommand::new()));
         r
     }
 
@@ -88,6 +91,8 @@ impl ClientCommandRegistry {
         r.register(Box::new(UploadExecClientCommand::new()));
         r.register(Box::new(DownloadClientCommand::new()));
         r.register(Box::new(WatchClientCommand::new()));
+        r.register(Box::new(KillClientCommand::new()));
+        r.register(Box::new(KickClientCommand::new()));
 
         //has to be last!
         r.register(Box::new(HelpClientCommand::new(r.get_list())));
