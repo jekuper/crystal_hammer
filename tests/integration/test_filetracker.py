@@ -87,6 +87,20 @@ def test_live_alert_channel_delivers(agent):
                               client_stdout=out)
 
 
+def test_ssh_login_surfaces_as_alert(agent):
+    """A login written to the auth log shows up as a live alert naming the source IP - the
+    'how did they get in' signal. The auth log is created if the distro keeps none."""
+    trigger = (
+        "L='Oct 28 00:00:00 h sshd[1]: Accepted publickey for root from 10.1.2.3 port 5 ssh2'; "
+        "w=0; for f in /var/log/auth.log /var/log/secure; do [ -e \"$f\" ] && { echo \"$L\" >> \"$f\"; w=1; }; done; "
+        "[ \"$w\" = 0 ] && echo \"$L\" >> /var/log/auth.log; true"
+    )
+    out = _listen(agent, settle=3, trigger=trigger, marker="10.1.2.3", poll=30)
+    if "10.1.2.3" not in out:
+        fail_with_diagnostics(agent, "SSH login was not surfaced as a live alert",
+                              client_stdout=out)
+
+
 def test_alert_coalescing(agent):
     """A flood of alerts is summarized in the operator's view instead of flooding it: a
     burst above the per-kind threshold yields a 'suppressed' summary line."""

@@ -153,6 +153,9 @@ async fn main() -> Result<()> {
     let audit = audit_engine.handle();
     audit_engine.start().await;
 
+    // Surface SSH login activity (who logged in, from where, and failures) as live alerts.
+    ch_monitor::authlog::spawn(audit.clone());
+
     // Evidence writer: persist every alert to the hash-chained log, whether or not an
     // operator is connected. Also keeps a live subscriber so the engine always records.
     if let Some(store) = &store {

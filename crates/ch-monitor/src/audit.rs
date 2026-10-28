@@ -1524,7 +1524,7 @@ fn lock_w<T>(m: &RwLockStd<T>) -> RwLockWriteGuard<'_, T> {
     m.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
