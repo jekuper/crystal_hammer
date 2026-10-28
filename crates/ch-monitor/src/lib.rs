@@ -9,6 +9,7 @@
 
 mod checks;
 pub mod audit;
+pub mod authlog;
 
 use serde::{Deserialize, Serialize};
 
