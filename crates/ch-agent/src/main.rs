@@ -123,10 +123,10 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("Initializing audit kernel system for file tracking...");
-    let mut watchlist = config.watchlist.clone();
-    watchlist.extend(ssh_key_dirs());
-    watchlist.sort();
-    watchlist.dedup();
+    // Defaults + every user's SSH key dir, then the operator's persisted runtime edits.
+    let mut base = config.watchlist.clone();
+    base.extend(ssh_key_dirs());
+    let watchlist = store.effective_watchlist(base).unwrap_or(config.watchlist.clone());
     tracing::info!("Tracking {} path(s).", watchlist.len());
     let audit_engine = ch_monitor::audit::AuditEngine::new(
         watchlist,
@@ -134,6 +134,10 @@ async fn main() -> Result<()> {
     );
     let audit = audit_engine.handle();
     audit_engine.start().await;
+
+    // Evidence writer: persist every alert to the hash-chained log, whether or not an
+    // operator is connected. Also keeps a live subscriber so the engine always records.
+    spawn_evidence_writer(store.clone(), audit.subscribe());
 
 
     let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());
@@ -183,6 +187,39 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+/// Drains the alert broadcast into the evidence log. Each append is a quick redb write;
+/// it runs on the blocking pool so it never stalls an async worker.
+fn spawn_evidence_writer(
+    store: Arc<ch_store::Store>,
+    mut alerts: tokio::sync::broadcast::Receiver<ch_common::proto::Alert>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    tokio::spawn(async move {
+        loop {
+            match alerts.recv().await {
+                Ok(alert) => {
+                    let store = store.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        match serde_json::to_value(&alert) {
+                            Ok(body) => {
+                                if let Err(e) = store.append("alert", &body) {
+                                    tracing::warn!("Failed to persist alert: {}", e);
+                                }
+                            }
+                            Err(e) => tracing::warn!("Failed to encode alert: {}", e),
+                        }
+                    })
+                    .await;
+                }
+                Err(RecvError::Lagged(n)) => {
+                    tracing::warn!("Evidence writer lagged; {} alert(s) not persisted.", n);
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// Per-user `.ssh` directories for every account in /etc/passwd, so authorized_keys and
