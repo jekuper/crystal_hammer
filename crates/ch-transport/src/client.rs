@@ -527,13 +527,14 @@ where
 {
     use ch_common::proto::Alert;
 
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     while let Some(msg) = channel.wait().await {
         match msg {
             russh::ChannelMsg::Data { ref data } => {
-                buf.push_str(&String::from_utf8_lossy(data));
-                while let Some(nl) = buf.find('\n') {
-                    let line: String = buf.drain(..=nl).collect();
+                buf.extend_from_slice(data);
+                while let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=nl).collect();
+                    let line = String::from_utf8_lossy(&line);
                     let line = line.trim();
                     if line.is_empty() {
                         continue;
