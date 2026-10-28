@@ -224,7 +224,7 @@ impl AgentCommand for KickAgentCommand {
 // =============================================================================
 
 /// Shared client-side exec: forwards the typed command to the agent and streams output.
-async fn run_remote(ctx: ClientCommandContext<'_>, name: &str, args: &[String]) -> Result<()> {
+pub(crate) async fn run_remote(ctx: ClientCommandContext<'_>, name: &str, args: &[String]) -> Result<()> {
     let session = ctx.session;
     let mut channel = session
         .channel_open_session()

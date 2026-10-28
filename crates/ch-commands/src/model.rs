@@ -11,6 +11,7 @@ use crate::{clear_command::ClearClientCommand, download_command::{DownloadAgentC
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
 use crate::watch_command::{WatchAgentCommand, WatchClientCommand};
 use crate::response_command::{KickAgentCommand, KickClientCommand, KillAgentCommand, KillClientCommand};
+use crate::service_command::{ServiceAgentCommand, ServiceClientCommand};
 
 #[async_trait]
 pub trait AgentCommand: Send + Sync {
@@ -61,6 +62,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(WatchAgentCommand::new()));
         r.register(Box::new(KillAgentCommand::new()));
         r.register(Box::new(KickAgentCommand::new()));
+        r.register(Box::new(ServiceAgentCommand::new()));
         r
     }
 
@@ -93,6 +95,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(WatchClientCommand::new()));
         r.register(Box::new(KillClientCommand::new()));
         r.register(Box::new(KickClientCommand::new()));
+        r.register(Box::new(ServiceClientCommand::new()));
 
         //has to be last!
         r.register(Box::new(HelpClientCommand::new(r.get_list())));
