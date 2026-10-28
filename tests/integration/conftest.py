@@ -358,8 +358,10 @@ def agent(target):
     bpf_snapshot(target, "before start")
 
     target.check(_NETNS_UP)
+    # CH_DISABLE_PERSISTENCE: keep the agent from installing a systemd/cron copy of itself
+    # that would survive teardown and race the next test's agent for the state DB lock.
     target.check(
-        f"setsid {IN_NS} {REMOTE_DIR}/ch-agent {AGENT_ARGS} "
+        f"setsid {IN_NS} env CH_DISABLE_PERSISTENCE=1 {REMOTE_DIR}/ch-agent {AGENT_ARGS} "
         f"</dev/null >{AGENT_LOG} 2>&1 & echo $! > {AGENT_PID}")
     a = Agent(target)
     try:

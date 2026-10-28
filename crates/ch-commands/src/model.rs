@@ -148,8 +148,9 @@ pub struct AgentCommandContext {
     pub stderr: Box<dyn AsyncWrite + Send + Unpin>,
     /// Out-of-band structured event channel
     pub events: mpsc::UnboundedSender<CommandEvent>,
-    /// Access to persistent key-value store (redb wrapper)
-    pub store: Arc<ch_store::Store>,
+    /// Persistent state store (redb). `None` when the DB could not be opened (e.g. another
+    /// agent instance holds the lock); the agent then runs without evidence/persistence.
+    pub store: Option<Arc<ch_store::Store>>,
 
     pub command_registry: Arc<AgentCommandRegistry>,
     pub persistence_registry: Arc<ch_persistence::Registry>,

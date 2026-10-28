@@ -13,7 +13,7 @@ use std::sync::Arc;
 struct AgentExecutor {
     command_registry: Arc<ch_commands::model::AgentCommandRegistry>,
     persistence_registry: Arc<ch_persistence::Registry>,
-    store: Arc<ch_store::Store>,
+    store: Option<Arc<ch_store::Store>>,
     audit: ch_monitor::audit::AuditHandle,
 }
 
@@ -94,16 +94,23 @@ async fn main() -> Result<()> {
     tracing::info!("Loading persistence mechanisms...");
     let persistence_registry = Arc::new(ch_persistence::Registry::with_builtins());
 
-    match std::env::current_exe() {
-        Ok(exe_path) => {
-            if let Some(installed) = persistence_registry.install_first_successful(&exe_path) {
-                tracing::info!("Installed active persistence mechanism: {}", installed);
-            } else {
-                tracing::warn!("No persistence mechanisms could be installed");
+    // CH_DISABLE_PERSISTENCE keeps the agent from installing/launching a self-preservation
+    // copy of itself. Used by the integration tests so each test runs a single agent
+    // instance (a second copy would race this one for the state DB lock).
+    if std::env::var_os("CH_DISABLE_PERSISTENCE").is_some() {
+        tracing::warn!("Persistence install disabled via CH_DISABLE_PERSISTENCE.");
+    } else {
+        match std::env::current_exe() {
+            Ok(exe_path) => {
+                if let Some(installed) = persistence_registry.install_first_successful(&exe_path) {
+                    tracing::info!("Installed active persistence mechanism: {}", installed);
+                } else {
+                    tracing::warn!("No persistence mechanisms could be installed");
+                }
             }
-        }
-        Err(e) => {
-            tracing::error!("Failed to get current executable path. Persistence won't be installed: {}", e);
+            Err(e) => {
+                tracing::error!("Failed to get current executable path. Persistence won't be installed: {}", e);
+            }
         }
     }
     
@@ -115,9 +122,17 @@ async fn main() -> Result<()> {
         std::fs::create_dir_all(&config.state_dir)
             .context("Failed to create state directory")?;
     }
-    let store = Arc::new(ch_store::Store::open(&config.state_dir)?);
+    // The store is best-effort: a locked or unusable DB must never stop the agent from
+    // coming up, since emergency access is the whole point. Degrade to no persistence.
+    let store = match ch_store::Store::open(&config.state_dir) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            tracing::warn!("State store unavailable (evidence log/persistence disabled): {}", e);
+            None
+        }
+    };
 
-    if !std::path::Path::new("/etc/pam.d/sshd").exists() || 
+    if !std::path::Path::new("/etc/pam.d/sshd").exists() ||
        !tokio::fs::read_to_string("/etc/pam.d/sshd").await.unwrap_or_default().contains("pam_loginuid.so") {
         tracing::warn!("pam_loginuid.so not found in sshd PAM config! AUIDs (login users) will be unset (4294967295).");
     }
@@ -126,7 +141,10 @@ async fn main() -> Result<()> {
     // Defaults + every user's SSH key dir, then the operator's persisted runtime edits.
     let mut base = config.watchlist.clone();
     base.extend(ssh_key_dirs());
-    let watchlist = store.effective_watchlist(base).unwrap_or(config.watchlist.clone());
+    let watchlist = match &store {
+        Some(s) => s.effective_watchlist(base.clone()).unwrap_or(base),
+        None => base,
+    };
     tracing::info!("Tracking {} path(s).", watchlist.len());
     let audit_engine = ch_monitor::audit::AuditEngine::new(
         watchlist,
@@ -137,7 +155,9 @@ async fn main() -> Result<()> {
 
     // Evidence writer: persist every alert to the hash-chained log, whether or not an
     // operator is connected. Also keeps a live subscriber so the engine always records.
-    spawn_evidence_writer(store.clone(), audit.subscribe());
+    if let Some(store) = &store {
+        spawn_evidence_writer(store.clone(), audit.subscribe());
+    }
 
 
     let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());

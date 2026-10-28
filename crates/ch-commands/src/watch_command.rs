@@ -29,31 +29,53 @@ impl WatchAgentCommand {
     }
 
     async fn stream(&self, mut ctx: AgentCommandContext) -> Result<()> {
-        // Start a little behind the head so the operator catches up on recent alerts,
-        // then follow the log. Polling keeps this race-free: the cursor only moves past
-        // records actually read, so nothing is dropped or doubled.
-        let latest = ctx.store.latest_cursor().unwrap_or(0);
-        let mut cursor = latest.saturating_sub(CATCHUP);
-        loop {
-            let records = ctx.store.since(cursor, 512).unwrap_or_default();
-            for rec in records {
-                cursor = rec.cursor;
-                if rec.kind != "alert" {
-                    continue;
-                }
-                let mut line = serde_json::to_string(&rec.body).unwrap_or_default();
-                line.push('\n');
-                // A write error means the operator disconnected; end quietly.
-                if ctx.stdout.write_all(line.as_bytes()).await.is_err() {
-                    return Ok(());
-                }
-                if ctx.stdout.flush().await.is_err() {
-                    return Ok(());
+        match ctx.store.clone() {
+            // With a store: catch the operator up on recent history, then follow the log.
+            // Polling keeps this race-free: the cursor only moves past records actually
+            // read, so nothing is dropped or doubled.
+            Some(store) => {
+                let latest = store.latest_cursor().unwrap_or(0);
+                let mut cursor = latest.saturating_sub(CATCHUP);
+                loop {
+                    for rec in store.since(cursor, 512).unwrap_or_default() {
+                        cursor = rec.cursor;
+                        if rec.kind != "alert" {
+                            continue;
+                        }
+                        if !write_line(&mut ctx.stdout, &serde_json::to_string(&rec.body).unwrap_or_default()).await {
+                            return Ok(());
+                        }
+                    }
+                    tokio::time::sleep(TAIL_POLL).await;
                 }
             }
-            tokio::time::sleep(TAIL_POLL).await;
+            // Degraded (no store): no evidence log to tail or catch up on, so forward live
+            // alerts straight from the engine for the life of the connection.
+            None => {
+                use tokio::sync::broadcast::error::RecvError;
+                let mut rx = ctx.audit.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(alert) => {
+                            let line = serde_json::to_string(&alert).unwrap_or_default();
+                            if !write_line(&mut ctx.stdout, &line).await {
+                                return Ok(());
+                            }
+                        }
+                        Err(RecvError::Lagged(_)) => continue,
+                        Err(RecvError::Closed) => return Ok(()),
+                    }
+                }
+            }
         }
     }
+}
+
+/// Writes one NDJSON line and flushes. Returns false once the operator disconnected.
+async fn write_line(w: &mut (impl AsyncWriteExt + Unpin), line: &str) -> bool {
+    w.write_all(line.as_bytes()).await.is_ok()
+        && w.write_all(b"\n").await.is_ok()
+        && w.flush().await.is_ok()
 }
 
 #[async_trait]
@@ -73,8 +95,10 @@ impl AgentCommand for WatchAgentCommand {
                 } else {
                     for path in &args[1..] {
                         let added = ctx.audit.add_watch(path.clone());
-                        if let Err(e) = ctx.store.add_watch(path) {
-                            tracing::warn!("Failed to persist watch add {path}: {e}");
+                        if let Some(store) = &ctx.store {
+                            if let Err(e) = store.add_watch(path) {
+                                tracing::warn!("Failed to persist watch add {path}: {e}");
+                            }
                         }
                         if added {
                             report.push_str(&format!("tracking {path} (enforced within a few seconds)\n"));
@@ -93,8 +117,10 @@ impl AgentCommand for WatchAgentCommand {
                 } else {
                     for path in &args[1..] {
                         let removed = ctx.audit.remove_watch(path);
-                        if let Err(e) = ctx.store.remove_watch(path) {
-                            tracing::warn!("Failed to persist watch remove {path}: {e}");
+                        if let Some(store) = &ctx.store {
+                            if let Err(e) = store.remove_watch(path) {
+                                tracing::warn!("Failed to persist watch remove {path}: {e}");
+                            }
                         }
                         if removed {
                             report.push_str(&format!("stopped tracking {path}\n"));
