@@ -136,12 +136,13 @@ the evidence trail leaves the box on every connect.
 Delivers the ability to act on what was found.
 
 - `kill` / `kick`, `rotate`, `service` abstraction, auto-backup before destructive change.
-- `sentinel` - scored-port protection: verify the expected binary owns each scored port,
-  auto-dossier + capture + kill squatter + restart + verify + respawn-trace on trigger.
 - File transfer with hash verification + resume for all upload/download.
+- ~~`sentinel` - scored-port protection: verify the expected binary owns each scored port,
+  auto-dossier + capture + kill squatter + restart + verify + respawn-trace on trigger.~~
+  **[cancelled]** deferred; may return later.
 
-**Done when:** an operator can respond to squatters, rogue processes, and credential
-abuse from within the tool, with backups taken automatically.
+**Done when:** an operator can respond to rogue processes and credential abuse from within
+the tool, with backups taken automatically.
 
 ---
 
