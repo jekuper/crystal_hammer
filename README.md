@@ -46,7 +46,10 @@ rather than shelling out to (possibly trojaned) system binaries.
 
 ## Status
 
-Early scaffold - see [ROADMAP.md](ROADMAP.md). Milestone **M0** (foundation) in progress.
+See [ROADMAP.md](ROADMAP.md). **M0-M1** are done (static builds, invisible SPA access,
+PTY shell, proxy chains). **M2-M5** are in progress: firewall lockdown/unlock, `info`
+host visibility, a persistence sweep, and a continuous file tracker with a live alert
+channel. Persisted state and the evidence log (`ch-store`) are next.
 
 ## Building
 

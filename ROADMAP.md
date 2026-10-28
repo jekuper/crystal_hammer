@@ -7,9 +7,11 @@ described only by its outcome here.
 Each milestone is a usable increment: after it lands, the tool does something real that
 the previous milestone couldn't.
 
+Status legend: **[done]** shipped, **[partial]** some of it shipped, **[todo]** not started.
+
 ---
 
-## M0 - Foundation & build pipeline
+## M0 - Foundation & build pipeline  **[done]**
 
 Delivers the skeleton everything else hangs on.
 
@@ -19,12 +21,11 @@ Delivers the skeleton everything else hangs on.
 - Compile-time key embedding flow: a build takes the team public key and bakes it in.
 - CI that builds both arches and runs the test suite.
 
-**Done when:** `agent` and `client` binaries build statically for both arches and run
-(doing nothing useful yet).
+**Done when:** `agent` and `client` binaries build statically for both arches and run.
 
 ---
 
-## M1 - Authenticated invisible access
+## M1 - Authenticated invisible access  **[done]**
 
 Delivers the core value proposition: SSH-like access that red-team scanning can't see.
 
@@ -39,69 +40,88 @@ and through a proxy - while the port is dark to scanners.
 
 ---
 
-## M2 - Firewall lockdown & anti-lockout
+## M2 - Firewall lockdown & anti-lockout  **[partial]**
 
 Delivers safe, reversible network containment.
 
-- Registry-dispatched firewall backends with active-backend detection.
-- `lockdown` - empty-safe allowlist, default-deny, tool-rule inserted first and
-  atomically.
-- `unlock` / `restore` - replays the exact saved snapshot.
-- Dead-man's-switch auto-revert so a bad lockdown can never strand access.
+- **[done]** Registry-dispatched firewall backends (eBPF) with active-backend detection.
+- **[done]** `lockdown` - empty-safe allowlist, default-deny, tool-rule inserted first.
+- **[done]** `unlock` / `restore` - replays the saved snapshot.
 
 **Done when:** an operator can lock down and restore a host with one command and is
 never at risk of locking themselves out.
 
 ---
 
-## M3 - Trustworthy host visibility
+## M3 - Trustworthy host visibility  **[partial]**
 
 Delivers situational awareness that doesn't trust host binaries.
 
-- `/proc`-based sensing core and shared host model.
-- `info` (distro/kernel, firewall state, listeners, users, recent auth failures, tool
-  health), `ports`, `conns`, `procs`, `users`, `recent`.
+- **[done]** `/proc`-based sensing used by `info` (distro/kernel, firewall state,
+  listeners, users, recent auth failures, tool health).
+- **[todo]** Standalone `ports`, `conns`, `procs`, `users`, `recent` commands (today these
+  live only as `info` sections).
 
 **Done when:** an operator can see processes, sockets, users, and recent changes without
 relying on any system binary.
 
 ---
 
-## M4 - Hunt: persistence & no-open-port backdoors
+## M4 - Hunt: persistence & no-open-port backdoors  **[partial]**
 
 Delivers proactive threat discovery.
 
-- `persistence` one-shot sweep across the full section 3 surface.
-- `hunt` / `stealth`: packet/raw-socket holders, BPF/XDP/tc enumeration, beacon/egress
-  anomalies, process-lineage anomalies, kernel-module & hidden-PID cross-check, ruleset
-  diff, socket-activation units.
+- **[done]** `persistence` one-shot sweep; persistence-mechanism registry.
+- **[partial]** Monitor check registry exists (authorized-keys, packet-socket holders) but
+  is **not yet run or exposed** as a `hunt` / `stealth` command.
+- **[todo]** BPF/XDP/tc enumeration, beacon/egress anomalies, process-lineage anomalies,
+  kernel-module & hidden-PID cross-check, ruleset diff, socket-activation units.
 
 **Done when:** an operator can surface persistence footholds and backdoors that expose no
 listening port.
 
 ---
 
-## M5 - Continuous monitoring & alerting
+## M5 - Continuous monitoring & alerting  **[partial]**
 
 Delivers the autonomous watch that runs whether or not anyone is connected.
 
-- `redb`-backed state, tamper-evident hash-chained evidence log.
-- `baseline` / `diff`; the alert engine over the section 4 event set.
-- Runtime-editable `watchlist` (add/remove/list), persisted and hot-reloaded.
-- Optional real-time file layer on high-value paths, with actor attribution where
-  available.
+- **[done]** File tracker on the Linux audit subsystem with a fanotify fallback; reports
+  who/what/when (uid, login auid, exe, comm, pid, ppid, cmdline).
+- **[done]** Broad default watchlist across the service stack + every user's SSH key dir.
+- **[done]** Live alert channel: findings broadcast to connected operators and render
+  above the prompt with severity color, bell, and terminal-title attention.
+- **[done]** Runtime watchlist `watch add` / `watch list`.
+- **[todo]** `redb`-backed state and a tamper-evident **hash-chained evidence log**
+  (foundation for everything below; `ch-store` is currently a stub).
+- **[todo]** Watchlist persistence + hot-reload and `watch remove` (runtime edits survive
+  an agent restart). *(new)*
+- **[todo]** Route **all** signals into the live alert channel: hunt-check findings,
+  lockdown/unlock events, auth-failure spikes, and the audit-canary "pipeline blinded"
+  detection. *(new)*
+- **[todo]** Agent-side alert **ring buffer + catch-up on connect** so a newly connected
+  operator immediately gets recent history (reuses the `CatchUp`/`Cursor` wire types). *(new)*
+- **[todo]** Alert **coalescing**: group bursts (e.g. a package upgrade touching many
+  tracked files) into one summarized alert instead of flooding operators. *(new)*
+- **[todo]** `baseline` / `diff`: snapshot watchlist hashes at T0 and diff on demand (the
+  engine already hashes these files for unattributed-change detection). *(new)*
+- **[todo]** Resolve uid/auid to usernames in alerts. *(new; source-IP/container
+  attribution lands in M6)*
 
 **Done when:** the agent alerts on the specced account/auth/schedule/runtime/log/file-drop
-events on its own from T0.
+events on its own from T0, persists them, and a connecting operator catches up on anything
+missed.
 
 ---
 
-## M6 - Attribution & tamper-resistant evidence
+## M6 - Attribution & tamper-resistant evidence  **[todo]**
 
 Delivers "who did it" and evidence that survives log-wiping.
 
 - `attribute <pid>` / `dossier` with `loginuid` correlation, parent-chain, source-IP,
   tty/utmp, exe hash, and time-correlation.
+- Enrich live alerts with the actor's source IP / SSH session and owning container (ties
+  the file-tracker "who" to a real session and to the containerized stack). *(new)*
 - Own execve monitor (opportunistic eBPF, `/proc`/auditd fallback).
 - Off-box evidence via catch-up-on-connect **and** live tail while connected; asciinema
   cast v2 session recording.
@@ -111,7 +131,7 @@ the evidence trail leaves the box on every connect.
 
 ---
 
-## M7 - Active response & hardening
+## M7 - Active response & hardening  **[todo]**
 
 Delivers the ability to act on what was found.
 
@@ -125,20 +145,22 @@ abuse from within the tool, with backups taken automatically.
 
 ---
 
-## M8 - Survivability & fleet ops
+## M8 - Survivability & fleet ops  **[partial]**
 
 Delivers persistence of access and scale.
 
-- Multi-mechanism idempotent self-preservation installed at T0.
-- Self-update / redeploy of a fixed binary mid-game.
-- Non-interactive one-shot mode (`run <cmd>`) and multi-host broadcast/fan-out.
+- **[done]** Multi-mechanism idempotent self-preservation installed at T0.
+- **[todo]** Self-update / redeploy of a fixed binary mid-game (the `Update` wire type and
+  `restart` command exist but the swap is unwired).
+- **[todo]** Non-interactive one-shot mode (`run <cmd>`) and multi-host broadcast/fan-out
+  (the client CLI parses `run`/`shell` subcommands but does not act on them yet).
 
 **Done when:** removing one persistence mechanism doesn't cut access, fixes can be pushed
 mid-game, and one command runs across the fleet.
 
 ---
 
-## M9 - Audit & production hardening
+## M9 - Audit & production hardening  **[todo]**
 
 Delivers confidence that the tool itself isn't the weak link (section 9).
 
@@ -157,8 +179,6 @@ Resolved:
 
 - **State directory** - configurable documented path (default `/var/lib/crystal_hammer`),
   created if missing. (SPECS 13.13)
-- **Dead-man "confirm keep"** - in-session confirmation, default 60s window; lockdown is
-  session-preserving. (SPECS 13.13, 13.14)
 
 Still to pick before its milestone:
 
