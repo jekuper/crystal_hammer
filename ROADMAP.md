@@ -131,12 +131,19 @@ the evidence trail leaves the box on every connect.
 
 ---
 
-## M7 - Active response & hardening  **[todo]**
+## M7 - Active response & hardening  **[partial]**
 
 Delivers the ability to act on what was found.
 
-- `kill` / `kick`, `rotate`, `service` abstraction, auto-backup before destructive change.
-- File transfer with hash verification + resume for all upload/download.
+- **[done]** `kill` / `kick` (terminate a process / boot a user's whole session, with
+  identity capture and host/agent safety guards).
+- **[done]** `service` - start/stop/restart/status across systemd / OpenRC / SysV,
+  init detected at runtime.
+- **[done]** `rotate` - lock + force-reset a user's password, backing up /etc/shadow first.
+- **[done]** Auto-backup before a destructive change (used by `rotate`).
+- **[done]** File transfer with hash + size verification for all upload/download.
+- **[todo]** Transfer **resume** (continue a partial transfer from its offset). Deferred -
+  the current transfer is already hash-verified; resume is a large-file/flaky-link nicety.
 - ~~`sentinel` - scored-port protection: verify the expected binary owns each scored port,
   auto-dossier + capture + kill squatter + restart + verify + respawn-trace on trigger.~~
   **[cancelled]** deferred; may return later.
