@@ -249,6 +249,23 @@ async fn run_operator_repl(
         file_completer: FilenameCompleter::new(),
     }));
 
+    // Subscribe to the agent's live file-tracker alerts for the life of the session. The
+    // external printer draws alerts above the prompt without mangling the current input.
+    match rl.create_external_printer() {
+        Ok(printer) => match session.channel_open_session().await {
+            Ok(channel) => {
+                if let Err(e) = channel.exec(false, b"watch stream").await {
+                    tracing::warn!("Could not start alert stream: {}", e);
+                } else {
+                    println!("[alerts] live file-tracker alerts enabled");
+                    tokio::spawn(run_alert_reader(channel, printer));
+                }
+            }
+            Err(e) => tracing::warn!("Could not open alert channel: {}", e),
+        },
+        Err(e) => tracing::warn!("Alerts will not display (external printer unavailable): {}", e),
+    }
+
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
     loop {
@@ -500,6 +517,100 @@ fn generate_nonce() -> [u8; 16] {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes);
     bytes
+}
+
+/// Reads the agent's newline-delimited JSON alert stream and renders each alert above the
+/// operator prompt. Runs until the agent closes the channel or the session drops.
+async fn run_alert_reader<P>(mut channel: russh::Channel<russh::client::Msg>, mut printer: P)
+where
+    P: rustyline::ExternalPrinter + Send + 'static,
+{
+    use ch_common::proto::Alert;
+
+    let mut buf = String::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { ref data } => {
+                buf.push_str(&String::from_utf8_lossy(data));
+                while let Some(nl) = buf.find('\n') {
+                    let line: String = buf.drain(..=nl).collect();
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<Alert>(line) {
+                        Ok(alert) => {
+                            if printer.print(format_alert(&alert)).is_err() {
+                                return;
+                            }
+                        }
+                        Err(e) => tracing::debug!("Unparseable alert line: {}", e),
+                    }
+                }
+            }
+            russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+}
+
+/// Formats an alert as a colored banner. Warn/Critical also ring the bell and set the
+/// terminal title so an operator looking away still notices (most terminals flag the tab).
+fn format_alert(a: &ch_common::proto::Alert) -> String {
+    use ch_common::proto::AlertSeverity::*;
+
+    let (color, tag) = match a.severity {
+        Critical => ("\x1b[1;97;41m", "CRITICAL"), // white on red
+        Warn => ("\x1b[1;30;43m", "WARN"),         // black on yellow
+        Info => ("\x1b[1;97;44m", "INFO"),         // white on blue
+    };
+    let reset = "\x1b[0m";
+
+    let mut attention = String::new();
+    if !matches!(a.severity, Info) {
+        attention.push('\x07'); // bell
+        attention.push_str(&format!("\x1b]0;!! CH ALERT: {} {} !!\x07", tag, a.path));
+    }
+
+    let who = format_actor(&a.actor);
+    let path = if a.path.is_empty() { "-" } else { a.path.as_str() };
+
+    format!(
+        "{attention}{color} !! ALERT [{tag}] {kind} {reset} {path}\n    who:  {who}\n    what: {detail}\n",
+        kind = a.kind,
+        detail = a.detail,
+    )
+}
+
+/// Renders the actor, emphasizing identity and omitting fields the agent could not fill.
+fn format_actor(actor: &ch_common::proto::Actor) -> String {
+    let mut parts = Vec::new();
+    if !actor.uid.is_empty() {
+        parts.push(format!("uid={}", actor.uid));
+    }
+    if !actor.auid.is_empty() {
+        parts.push(format!("login(auid)={}", actor.auid));
+    }
+    if actor.pid != 0 {
+        parts.push(format!("pid={}", actor.pid));
+    }
+    if !actor.ppid.is_empty() {
+        parts.push(format!("ppid={}", actor.ppid));
+    }
+    if !actor.exe.is_empty() {
+        parts.push(format!("exe={}", actor.exe));
+    }
+    if !actor.comm.is_empty() {
+        parts.push(format!("comm={}", actor.comm));
+    }
+    if !actor.cmdline.is_empty() {
+        parts.push(format!("cmd=[{}]", actor.cmdline));
+    }
+    if parts.is_empty() {
+        "no process attributed (possible out-of-band change)".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 /// Re-export so callers build hop chains without reaching into `proxy`.

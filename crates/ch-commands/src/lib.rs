@@ -11,3 +11,4 @@ pub mod restart_command;
 pub mod persistence_command;
 pub mod download_command;
 pub mod upload_exec_command;
+pub mod watch_command;

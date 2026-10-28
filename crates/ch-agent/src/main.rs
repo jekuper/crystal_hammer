@@ -14,6 +14,7 @@ struct AgentExecutor {
     command_registry: Arc<ch_commands::model::AgentCommandRegistry>,
     persistence_registry: Arc<ch_persistence::Registry>,
     store: Arc<ch_store::Store>,
+    audit: ch_monitor::audit::AuditHandle,
 }
 
 #[async_trait::async_trait]
@@ -40,6 +41,7 @@ impl ch_transport::CommandExecutor for AgentExecutor {
                 store: self.store.clone(),
                 command_registry: command_registry_copy,
                 persistence_registry: persistence_registry_copy,
+                audit: self.audit.clone(),
             };
             cmd.execute(args, ctx)
                 .await
@@ -122,18 +124,20 @@ async fn main() -> Result<()> {
 
     tracing::info!("Initializing audit kernel system for file tracking...");
     let audit_engine = ch_monitor::audit::AuditEngine::new(
-        config.watchlist.clone(), 
+        config.watchlist.clone(),
         config.allow_audit_daemon
     );
+    let audit = audit_engine.handle();
     audit_engine.start().await;
 
 
     let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());
-    
+
     let executor = Arc::new(AgentExecutor {
         command_registry,
         persistence_registry,
         store,
+        audit,
     });
 
     let firewall_handle = match Firewall::init_global() {

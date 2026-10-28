@@ -122,6 +122,23 @@ impl AuditHandle {
         list.push(path);
         true
     }
+
+    /// Inject a synthetic alert so an operator can confirm the live channel end to end.
+    pub fn emit_test(&self, detail: &str) {
+        let detail = if detail.is_empty() {
+            "operator-triggered test alert".to_string()
+        } else {
+            detail.to_string()
+        };
+        let _ = self.alerts.send(Alert {
+            kind: "test".to_string(),
+            severity: AlertSeverity::Warn,
+            path: String::new(),
+            detail,
+            actor: Actor::default(),
+            unix_time: unix_now(),
+        });
+    }
 }
 
 #[derive(Clone)]
