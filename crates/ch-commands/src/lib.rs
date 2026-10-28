@@ -14,3 +14,4 @@ pub mod upload_exec_command;
 pub mod watch_command;
 pub mod response_command;
 pub mod service_command;
+pub mod rotate_command;
