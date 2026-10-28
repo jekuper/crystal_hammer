@@ -9,6 +9,7 @@ use rustyline::completion::{FilenameCompleter, Pair};
 
 use crate::{clear_command::ClearClientCommand, download_command::{DownloadAgentCommand, DownloadClientCommand}, help_command::HelpClientCommand, info_command::{InfoAgentCommand, InfoClientCommand}, persistence_command::{PersistenceAgentCommand, PersistenceClientCommand}, restart_command::{RestartAgentCommand, RestartClientCommand}, shell_command::ShellClientCommand, unlock_command::{UnlockAgentCommand, UnlockClientCommand}, upload_command::{UploadAgentCommand, UploadClientCommand}, upload_exec_command::{UploadExecAgentCommand, UploadExecClientCommand}};
 use crate::lockdown_command::{LockdownAgentCommand, LockdownClientCommand};
+use crate::watch_command::{WatchAgentCommand, WatchClientCommand};
 
 #[async_trait]
 pub trait AgentCommand: Send + Sync {
@@ -56,6 +57,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(PersistenceAgentCommand::new()));
         r.register(Box::new(UploadExecAgentCommand::new()));
         r.register(Box::new(DownloadAgentCommand::new()));
+        r.register(Box::new(WatchAgentCommand::new()));
         r
     }
 
@@ -85,6 +87,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(PersistenceClientCommand::new()));
         r.register(Box::new(UploadExecClientCommand::new()));
         r.register(Box::new(DownloadClientCommand::new()));
+        r.register(Box::new(WatchClientCommand::new()));
 
         //has to be last!
         r.register(Box::new(HelpClientCommand::new(r.get_list())));
@@ -150,4 +153,6 @@ pub struct AgentCommandContext {
 
     pub command_registry: Arc<AgentCommandRegistry>,
     pub persistence_registry: Arc<ch_persistence::Registry>,
+    /// Live file-tracker: subscribe to alerts, list and extend the watchlist.
+    pub audit: ch_monitor::audit::AuditHandle,
 }

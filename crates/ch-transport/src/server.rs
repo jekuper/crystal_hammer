@@ -367,17 +367,27 @@ async fn run_exec(
 
     let stdout_forwarder = tokio::spawn(async move {
         while let Some(chunk) = stdout_rx.recv().await {
-            let _ = handle_stdout
+            // A send error means the operator disconnected. Stop and drop the receiver so
+            // a long-lived command (e.g. `watch stream`) sees its writes fail and exits.
+            if handle_stdout
                 .data(channel_id, russh::CryptoVec::from_slice(&chunk))
-                .await;
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     });
 
     let stderr_forwarder = tokio::spawn(async move {
         while let Some(chunk) = stderr_rx.recv().await {
-            let _ = handle_stderr
+            if handle_stderr
                 .extended_data(channel_id, 1, russh::CryptoVec::from_slice(&chunk))
-                .await;
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     });
 

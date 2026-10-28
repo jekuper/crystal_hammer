@@ -14,6 +14,7 @@ struct AgentExecutor {
     command_registry: Arc<ch_commands::model::AgentCommandRegistry>,
     persistence_registry: Arc<ch_persistence::Registry>,
     store: Arc<ch_store::Store>,
+    audit: ch_monitor::audit::AuditHandle,
 }
 
 #[async_trait::async_trait]
@@ -40,6 +41,7 @@ impl ch_transport::CommandExecutor for AgentExecutor {
                 store: self.store.clone(),
                 command_registry: command_registry_copy,
                 persistence_registry: persistence_registry_copy,
+                audit: self.audit.clone(),
             };
             cmd.execute(args, ctx)
                 .await
@@ -121,19 +123,26 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("Initializing audit kernel system for file tracking...");
+    let mut watchlist = config.watchlist.clone();
+    watchlist.extend(ssh_key_dirs());
+    watchlist.sort();
+    watchlist.dedup();
+    tracing::info!("Tracking {} path(s).", watchlist.len());
     let audit_engine = ch_monitor::audit::AuditEngine::new(
-        config.watchlist.clone(), 
+        watchlist,
         config.allow_audit_daemon
     );
+    let audit = audit_engine.handle();
     audit_engine.start().await;
 
 
     let command_registry = Arc::new(ch_commands::model::AgentCommandRegistry::with_builtins());
-    
+
     let executor = Arc::new(AgentExecutor {
         command_registry,
         persistence_registry,
         store,
+        audit,
     });
 
     let firewall_handle = match Firewall::init_global() {
@@ -174,6 +183,29 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+/// Per-user `.ssh` directories for every account in /etc/passwd, so authorized_keys and
+/// private keys are tracked box-wide. Watching the dir covers key files added later; the
+/// integrity rescan walks it. Users created mid-incident can be added with `watch add`.
+fn ssh_key_dirs() -> Vec<String> {
+    let mut dirs = vec!["/root/.ssh".to_string()];
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        for line in passwd.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 6 {
+                continue;
+            }
+            let home = fields[5];
+            // Skip accounts parked on non-home paths (nobody, daemons).
+            if !home.starts_with('/') || home == "/" || home == "/nonexistent" || home == "/dev/null"
+            {
+                continue;
+            }
+            dirs.push(format!("{}/.ssh", home.trim_end_matches('/')));
+        }
+    }
+    dirs
 }
 
 fn is_root() -> bool {

@@ -435,6 +435,7 @@ dependencies = [
  "async-trait",
  "ch-common",
  "ch-firewall",
+ "ch-monitor",
  "ch-persistence",
  "ch-store",
  "ch-transport",
@@ -444,6 +445,7 @@ dependencies = [
  "russh",
  "russh-keys",
  "rustyline",
+ "serde_json",
  "sha2 0.11.0",
  "tabled",
  "tokio",
@@ -576,6 +578,7 @@ dependencies = [
  "russh",
  "russh-keys",
  "rustyline",
+ "serde_json",
  "tokio",
  "tracing",
 ]
