@@ -87,6 +87,14 @@ def test_live_alert_channel_delivers(agent):
                               client_stdout=out)
 
 
+def test_alert_coalescing(agent):
+    """A flood of alerts is summarized in the operator's view instead of flooding it: a
+    burst above the per-kind threshold yields a 'suppressed' summary line."""
+    out = _listen(agent, feed="watch test 40 floodburst\n", marker="suppressed", poll=25)
+    if "suppressed" not in out:
+        fail_with_diagnostics(agent, "a flood of alerts was not coalesced", client_stdout=out)
+
+
 def test_alert_catch_up_on_connect(agent):
     """Persistence + catch-up: one operator triggers an alert and leaves; a second
     operator connecting afterward is caught up on it from the evidence log, unprompted."""

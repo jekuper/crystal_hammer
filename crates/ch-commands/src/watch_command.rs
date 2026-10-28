@@ -6,13 +6,84 @@
 //! `add`, `remove` and `test` are ordinary one-shot operator commands; `add`/`remove`
 //! persist (when a store is present) so runtime edits survive an agent restart.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
 use async_trait::async_trait;
+use ch_common::proto::{Alert, AlertSeverity};
 use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
 
 use crate::model::{AgentCommand, AgentCommandContext, ClientCommand, ClientCommandContext};
+
+/// Per-kind flood control for the operator's view. Up to `COALESCE_THRESHOLD` alerts of a
+/// kind are shown per `COALESCE_WINDOW`; the rest are counted and summarized. This only
+/// shapes what the operator sees live - the evidence log still records every alert.
+const COALESCE_WINDOW: Duration = Duration::from_secs(10);
+const COALESCE_THRESHOLD: u32 = 25;
+
+struct Win {
+    start: Instant,
+    shown: u32,
+    suppressed: u32,
+}
+
+#[derive(Default)]
+struct Coalescer {
+    kinds: HashMap<String, Win>,
+}
+
+impl Coalescer {
+    /// Show this alert now, or suppress it (count it toward a later summary)?
+    fn admit(&mut self, kind: &str) -> bool {
+        let now = Instant::now();
+        let w = self.kinds.entry(kind.to_string()).or_insert(Win {
+            start: now,
+            shown: 0,
+            suppressed: 0,
+        });
+        if now.duration_since(w.start) >= COALESCE_WINDOW {
+            w.start = now;
+            w.shown = 0;
+            w.suppressed = 0;
+        }
+        if w.shown < COALESCE_THRESHOLD {
+            w.shown += 1;
+            true
+        } else {
+            w.suppressed += 1;
+            false
+        }
+    }
+
+    /// Per-kind suppressed counts to summarize now, resetting those windows.
+    fn drain(&mut self) -> Vec<(String, u32)> {
+        let now = Instant::now();
+        let mut out = Vec::new();
+        for (kind, w) in self.kinds.iter_mut() {
+            if w.suppressed > 0 {
+                out.push((kind.clone(), w.suppressed));
+                w.start = now;
+                w.shown = 0;
+                w.suppressed = 0;
+            }
+        }
+        out
+    }
+}
+
+fn coalesced_alert(kind: &str, n: u32) -> Alert {
+    Alert {
+        kind: "coalesced".to_string(),
+        severity: AlertSeverity::Warn,
+        path: String::new(),
+        detail: format!("{n} further {kind} alert(s) suppressed in the last {}s", COALESCE_WINDOW.as_secs()),
+        actor: ch_common::proto::Actor::default(),
+        unix_time: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+    }
+}
 pub struct WatchAgentCommand {}
 
 impl WatchAgentCommand {
@@ -26,27 +97,39 @@ impl WatchAgentCommand {
         // Subscribe first so any alert published between the catch-up snapshot and the live
         // loop is captured; the per-alert sequence number then dedups the overlap exactly.
         let mut live = ctx.audit.subscribe();
+        let mut coalescer = Coalescer::default();
         let mut last_seq = 0u64;
         for (seq, alert) in ctx.audit.recent() {
             last_seq = seq;
-            if !write_alert(&mut ctx.stdout, &alert).await {
+            if coalescer.admit(&alert.kind) && !write_alert(&mut ctx.stdout, &alert).await {
                 return Ok(());
             }
         }
 
+        let mut flush = tokio::time::interval(COALESCE_WINDOW);
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            match live.recv().await {
-                Ok((seq, alert)) => {
-                    if seq <= last_seq {
-                        continue; // already delivered in the catch-up snapshot
+            tokio::select! {
+                r = live.recv() => match r {
+                    Ok((seq, alert)) => {
+                        if seq <= last_seq {
+                            continue; // already delivered in the catch-up snapshot
+                        }
+                        last_seq = seq;
+                        if coalescer.admit(&alert.kind) && !write_alert(&mut ctx.stdout, &alert).await {
+                            return Ok(());
+                        }
                     }
-                    last_seq = seq;
-                    if !write_alert(&mut ctx.stdout, &alert).await {
-                        return Ok(());
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return Ok(()),
+                },
+                _ = flush.tick() => {
+                    for (kind, n) in coalescer.drain() {
+                        if !write_alert(&mut ctx.stdout, &coalesced_alert(&kind, n)).await {
+                            return Ok(());
+                        }
                     }
                 }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => return Ok(()),
             }
         }
     }
@@ -115,10 +198,18 @@ impl AgentCommand for WatchAgentCommand {
                 Ok(())
             }
             "test" => {
-                let detail = args[1..].join(" ");
-                ctx.audit.emit_test(&detail);
+                // `watch test [count] [detail...]`: a leading integer fires that many
+                // alerts in one shot (used to exercise flood coalescing).
+                let rest = &args[1..];
+                let (count, detail) = match rest.first().and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) => (n.clamp(1, 1000), rest[1..].join(" ")),
+                    None => (1, rest.join(" ")),
+                };
+                for _ in 0..count {
+                    ctx.audit.emit_test(&detail);
+                }
                 ctx.stdout
-                    .write_all(b"test alert sent to connected operators\n")
+                    .write_all(format!("sent {count} test alert(s) to connected operators\n").as_bytes())
                     .await?;
                 Ok(())
             }
