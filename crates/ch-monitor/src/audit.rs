@@ -123,6 +123,16 @@ impl AuditHandle {
         true
     }
 
+    /// Stop tracking `path`. Returns false if it wasn't tracked. Audit watches are never
+    /// torn down (additive-only policy), and a standing fanotify mark is left in place; this
+    /// just stops the hash rescan and future re-marks from covering the path.
+    pub fn remove_watch(&self, path: &str) -> bool {
+        let mut list = lock_w(&self.watchlist);
+        let before = list.len();
+        list.retain(|p| p != path);
+        list.len() != before
+    }
+
     /// Inject a synthetic alert so an operator can confirm the live channel end to end.
     pub fn emit_test(&self, detail: &str) {
         let detail = if detail.is_empty() {

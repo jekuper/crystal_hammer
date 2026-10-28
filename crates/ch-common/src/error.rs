@@ -12,6 +12,9 @@ pub enum Error {
     #[error("serialization error: {0}")]
     Serde(String),
 
+    #[error("store error: {0}")]
+    Store(String),
+
     #[error("authentication failed")]
     Auth,
 

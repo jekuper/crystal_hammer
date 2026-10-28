@@ -404,6 +404,7 @@ dependencies = [
  "ch-store",
  "ch-transport",
  "nix 0.29.0",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -26,8 +26,11 @@ impl Record {
     }
 }
 
-/// Verify the chain is intact from genesis. Implemented at M5/M6.
-pub fn verify_chain(_records: &[Record]) -> bool {
-    // M5: recompute each `prev` link, confirm the cursor is contiguous.
-    true
+/// Verify a contiguous run of records: each cursor follows the last and each `prev` link
+/// equals the previous record's hash. A deletion (cursor gap) or edit (hash mismatch)
+/// fails. Works on any contiguous slice, so a catch-up batch can be checked on its own.
+pub fn verify_chain(records: &[Record]) -> bool {
+    records.windows(2).all(|w| {
+        w[1].cursor == w[0].cursor + 1 && w[1].prev == w[0].hash().0
+    })
 }

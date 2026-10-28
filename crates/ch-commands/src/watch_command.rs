@@ -1,18 +1,25 @@
 //! File-tracker control and the live alert stream.
 //!
-//! `watch stream` is the long-lived subcommand the client subscribes to on connect; it
-//! writes one JSON alert per line for the life of the channel. `list`/`add`/`test` are
-//! ordinary one-shot operator commands.
+//! `watch stream` is the long-lived subcommand the client subscribes to on connect. It
+//! first replays recent history from the evidence log (catch-up) and then tails it, so a
+//! newly connected operator sees what they missed and then everything live. `list`, `add`,
+//! `remove` and `test` are ordinary one-shot operator commands; `add`/`remove` persist so
+//! runtime edits survive an agent restart.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
-use ch_common::proto::{Actor, Alert, AlertSeverity};
 use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::broadcast::error::RecvError;
 
 use crate::model::{AgentCommand, AgentCommandContext, ClientCommand, ClientCommandContext};
+
+/// How many recent evidence records a connecting operator is caught up on.
+const CATCHUP: u64 = 50;
+/// How often the live tail polls the evidence log for new records.
+const TAIL_POLL: Duration = Duration::from_millis(200);
 
 pub struct WatchAgentCommand {}
 
@@ -22,32 +29,30 @@ impl WatchAgentCommand {
     }
 
     async fn stream(&self, mut ctx: AgentCommandContext) -> Result<()> {
-        let mut rx = ctx.audit.subscribe();
+        // Start a little behind the head so the operator catches up on recent alerts,
+        // then follow the log. Polling keeps this race-free: the cursor only moves past
+        // records actually read, so nothing is dropped or doubled.
+        let latest = ctx.store.latest_cursor().unwrap_or(0);
+        let mut cursor = latest.saturating_sub(CATCHUP);
         loop {
-            let alert = match rx.recv().await {
-                Ok(alert) => alert,
-                Err(RecvError::Lagged(n)) => Alert {
-                    kind: "stream_lagged".to_string(),
-                    severity: AlertSeverity::Warn,
-                    path: String::new(),
-                    detail: format!("{n} alert(s) dropped: this client fell behind"),
-                    actor: Actor::default(),
-                    unix_time: 0,
-                },
-                Err(RecvError::Closed) => break,
-            };
-
-            let mut line = serde_json::to_string(&alert).unwrap_or_default();
-            line.push('\n');
-            // A write error means the operator disconnected; end the stream quietly.
-            if ctx.stdout.write_all(line.as_bytes()).await.is_err() {
-                break;
+            let records = ctx.store.since(cursor, 512).unwrap_or_default();
+            for rec in records {
+                cursor = rec.cursor;
+                if rec.kind != "alert" {
+                    continue;
+                }
+                let mut line = serde_json::to_string(&rec.body).unwrap_or_default();
+                line.push('\n');
+                // A write error means the operator disconnected; end quietly.
+                if ctx.stdout.write_all(line.as_bytes()).await.is_err() {
+                    return Ok(());
+                }
+                if ctx.stdout.flush().await.is_err() {
+                    return Ok(());
+                }
             }
-            if ctx.stdout.flush().await.is_err() {
-                break;
-            }
+            tokio::time::sleep(TAIL_POLL).await;
         }
-        Ok(())
     }
 }
 
@@ -67,10 +72,34 @@ impl AgentCommand for WatchAgentCommand {
                     report.push_str("usage: watch add <path> [path...]\n");
                 } else {
                     for path in &args[1..] {
-                        if ctx.audit.add_watch(path.clone()) {
+                        let added = ctx.audit.add_watch(path.clone());
+                        if let Err(e) = ctx.store.add_watch(path) {
+                            tracing::warn!("Failed to persist watch add {path}: {e}");
+                        }
+                        if added {
                             report.push_str(&format!("tracking {path} (enforced within a few seconds)\n"));
                         } else {
                             report.push_str(&format!("already tracked: {path}\n"));
+                        }
+                    }
+                }
+                ctx.stdout.write_all(report.as_bytes()).await?;
+                Ok(())
+            }
+            "remove" => {
+                let mut report = String::new();
+                if args.len() < 2 {
+                    report.push_str("usage: watch remove <path> [path...]\n");
+                } else {
+                    for path in &args[1..] {
+                        let removed = ctx.audit.remove_watch(path);
+                        if let Err(e) = ctx.store.remove_watch(path) {
+                            tracing::warn!("Failed to persist watch remove {path}: {e}");
+                        }
+                        if removed {
+                            report.push_str(&format!("stopped tracking {path}\n"));
+                        } else {
+                            report.push_str(&format!("was not tracked: {path}\n"));
                         }
                     }
                 }
@@ -126,22 +155,24 @@ impl ClientCommand for WatchClientCommand {
         "Usage: watch <subcommand>\n\n\
         Subcommands:\n\
           list              Show the files currently tracked\n\
-          add <path>...     Start tracking one or more files/directories at runtime\n\
+          add <path>...     Start tracking files/directories at runtime (persisted)\n\
+          remove <path>...  Stop tracking files/directories (persisted)\n\
           test [message]    Fire a synthetic alert to verify the live channel\n\n\
-        Alerts from tracked files stream to this console automatically while connected."
+        Alerts from tracked files stream to this console automatically while connected,\n\
+        including recent ones you missed before connecting."
     }
 
     fn complete_arg(&self, preceding_args: &[&str], word: &str, _ctx: &rustyline::Context<'_>, filename_completer: &FilenameCompleter) -> Vec<Pair> {
         // First token: the subcommand.
         if preceding_args.is_empty() {
-            return ["list", "add", "test"]
+            return ["list", "add", "remove", "test"]
                 .iter()
                 .filter(|s| s.starts_with(word))
                 .map(|s| Pair { display: s.to_string(), replacement: format!("{s} ") })
                 .collect();
         }
-        // `add` takes file paths; defer to the filename completer.
-        if preceding_args[0] == "add" {
+        // `add`/`remove` take file paths; defer to the filename completer.
+        if matches!(preceding_args[0], "add" | "remove") {
             if let Ok((_, pairs)) = filename_completer.complete_path(word, word.len()) {
                 return pairs;
             }
