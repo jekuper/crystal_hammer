@@ -13,6 +13,7 @@ use crate::watch_command::{WatchAgentCommand, WatchClientCommand};
 use crate::response_command::{KickAgentCommand, KickClientCommand, KillAgentCommand, KillClientCommand};
 use crate::service_command::{ServiceAgentCommand, ServiceClientCommand};
 use crate::rotate_command::{RotateAgentCommand, RotateClientCommand};
+use crate::attribute_command::{AttributeAgentCommand, AttributeClientCommand};
 
 #[async_trait]
 pub trait AgentCommand: Send + Sync {
@@ -65,6 +66,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(KickAgentCommand::new()));
         r.register(Box::new(ServiceAgentCommand::new()));
         r.register(Box::new(RotateAgentCommand::new()));
+        r.register(Box::new(AttributeAgentCommand::new()));
         r
     }
 
@@ -99,6 +101,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(KickClientCommand::new()));
         r.register(Box::new(ServiceClientCommand::new()));
         r.register(Box::new(RotateClientCommand::new()));
+        r.register(Box::new(AttributeClientCommand::new()));
 
         //has to be last!
         r.register(Box::new(HelpClientCommand::new(r.get_list())));
