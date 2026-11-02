@@ -87,6 +87,22 @@ def test_rotate_locks_and_backs_up(agent):
         fail_with_diagnostics(agent, "no /etc/shadow backup was created", client_stdout=out)
 
 
+def test_attribute_builds_dossier(agent):
+    """`attribute <pid>` returns identity, exe, a parent chain, and login correlation."""
+    pid = agent.target.check("setsid sleep 600 >/dev/null 2>&1 & echo $!").strip()
+    try:
+        out, err, code = run_client(agent, f"attribute {pid}\nexit\n".encode())
+        if code != 0:
+            fail_with_diagnostics(agent, "attribute command failed",
+                                  client_stdout=out, client_stderr=err, client_exit=code)
+        for token in (f"Attribution: pid {pid}", "exe:", "login(auid)", "Parent chain"):
+            if token not in out:
+                fail_with_diagnostics(agent, f"dossier missing section: {token!r}",
+                                      client_stdout=out, client_stderr=err)
+    finally:
+        agent.target.sh(f"kill {pid} 2>/dev/null; true")
+
+
 def test_kick_refuses_root(agent):
     """`kick` must refuse uid 0: killing every root process would take down the host and
     the agent itself."""
