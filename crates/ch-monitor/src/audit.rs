@@ -484,12 +484,17 @@ impl AuditEngine {
             }
         }
 
-        // 2. Kernel Module Syscalls, for every ABI this machine can run
+        // 2. Kernel module + execution syscalls, for every ABI this machine can run.
         for arch in rules::ARCHES {
             rules.push(format!(
                 "-a always,exit -F arch={} -S {} -k {AUDIT_KEY}",
                 arch.name,
                 rules::MODULE_SYSCALLS.join(",")
+            ));
+            rules.push(format!(
+                "-a always,exit -F arch={} -S {} -k {AUDIT_KEY}",
+                arch.name,
+                rules::EXEC_SYSCALLS.join(",")
             ));
         }
 
@@ -1238,11 +1243,23 @@ impl EventProcessor {
         );
         let is_module = module_name.is_some()
             || syscall_name.is_some_and(|n| rules::MODULE_SYSCALLS.contains(&n));
+        let is_exec = !is_module && syscall_name.is_some_and(|n| rules::EXEC_SYSCALLS.contains(&n));
+
+        let exe = sc.get("exe").cloned().unwrap_or_default();
+        let kind = if is_module {
+            "kernel_module"
+        } else if is_exec {
+            "exec"
+        } else {
+            "file_access"
+        };
 
         let mut finding = Finding {
-            kind: if is_module { "kernel_module" } else { "file_access" },
+            kind,
             path: if is_module {
                 module_name.unwrap_or_default()
+            } else if is_exec && !exe.is_empty() {
+                exe.clone()
             } else {
                 paths.join(",")
             },
@@ -1250,7 +1267,7 @@ impl EventProcessor {
             ppid: sc.get("ppid").cloned().unwrap_or_default(),
             uid: sc.get("uid").cloned().unwrap_or_default(),
             auid: sc.get("auid").cloned().unwrap_or_default(),
-            exe: sc.get("exe").cloned().unwrap_or_default(),
+            exe,
             comm: sc.get("comm").cloned().unwrap_or_default(),
             cmdline: find("PROCTITLE")
                 .and_then(|f| f.get("proctitle"))
@@ -1263,6 +1280,8 @@ impl EventProcessor {
             success: sc.get("success").cloned().unwrap_or_default(),
             detail: if is_module {
                 "kernel module load/unload".to_owned()
+            } else if is_exec {
+                "process executed".to_owned()
             } else {
                 "watched file accessed".to_owned()
             },
@@ -1709,18 +1728,26 @@ mod rules {
     const ALL_SYSCALLS_THRESHOLD: usize = 2048 - 32;
 
     pub const MODULE_SYSCALLS: [&str; 3] = ["init_module", "finit_module", "delete_module"];
+    /// Execution syscalls: auditing these gives an attributed record of every program run.
+    pub const EXEC_SYSCALLS: [&str; 2] = ["execve", "execveat"];
 
     #[cfg(target_arch = "x86_64")]
     pub const ARCHES: &[ArchSyscalls] = &[
         ArchSyscalls {
             name: "b64",
             arch: netlink_packet_audit::AUDIT_ARCH_X86_64,
-            syscalls: &[("init_module", 175), ("delete_module", 176), ("finit_module", 313)],
+            syscalls: &[
+                ("init_module", 175), ("delete_module", 176), ("finit_module", 313),
+                ("execve", 59), ("execveat", 322),
+            ],
         },
         ArchSyscalls {
             name: "b32",
             arch: netlink_packet_audit::AUDIT_ARCH_I386,
-            syscalls: &[("init_module", 128), ("delete_module", 129), ("finit_module", 350)],
+            syscalls: &[
+                ("init_module", 128), ("delete_module", 129), ("finit_module", 350),
+                ("execve", 11), ("execveat", 358),
+            ],
         },
     ];
 
@@ -1729,12 +1756,18 @@ mod rules {
         ArchSyscalls {
             name: "b64",
             arch: netlink_packet_audit::AUDIT_ARCH_AARCH64,
-            syscalls: &[("init_module", 105), ("delete_module", 106), ("finit_module", 273)],
+            syscalls: &[
+                ("init_module", 105), ("delete_module", 106), ("finit_module", 273),
+                ("execve", 221), ("execveat", 281),
+            ],
         },
         ArchSyscalls {
             name: "b32",
             arch: netlink_packet_audit::AUDIT_ARCH_ARM,
-            syscalls: &[("init_module", 128), ("delete_module", 129), ("finit_module", 379)],
+            syscalls: &[
+                ("init_module", 128), ("delete_module", 129), ("finit_module", 379),
+                ("execve", 11), ("execveat", 387),
+            ],
         },
     ];
 
@@ -2264,6 +2297,24 @@ mod tests {
         assert_eq!(rules::syscall_name(Some("c000003e"), Some("313")), Some("finit_module"));
         assert_eq!(rules::syscall_name(Some("40000003"), Some("128")), Some("init_module"));
         assert_eq!(rules::syscall_name(Some("c000003e"), Some("2")), None);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn names_exec_syscalls() {
+        // b64 execve=59, execveat=322; b32 execve=11.
+        assert_eq!(rules::syscall_name(Some("c000003e"), Some("59")), Some("execve"));
+        assert_eq!(rules::syscall_name(Some("c000003e"), Some("322")), Some("execveat"));
+        assert_eq!(rules::syscall_name(Some("40000003"), Some("11")), Some("execve"));
+    }
+
+    #[test]
+    fn exec_rule_is_requested() {
+        let rules = engine().desired_rules();
+        assert!(
+            rules.iter().any(|r| r.contains("-S execve,execveat")),
+            "desired rules should include an execve watch"
+        );
     }
 
     #[tokio::test]

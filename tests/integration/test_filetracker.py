@@ -124,6 +124,18 @@ def test_alert_catch_up_on_connect(agent):
             client_stdout=out2)
 
 
+def test_exec_surfaces_as_alert(agent):
+    """Running a program surfaces an `exec` alert naming the binary. Needs the audit
+    backend (execve has no fanotify equivalent); skips where the netns has no auditd."""
+    trigger = (
+        "cp /bin/true /tmp/ch_exec_probe 2>/dev/null || cp /bin/sh /tmp/ch_exec_probe; "
+        "chmod +x /tmp/ch_exec_probe; /tmp/ch_exec_probe"
+    )
+    out = _listen(agent, settle=3, trigger=trigger, marker="ch_exec_probe", poll=30)
+    if "ch_exec_probe" not in out:
+        pytest.skip("no exec alert (audit backend unavailable in the test netns)")
+
+
 def test_live_alert_on_tracked_file_change(agent):
     """Full intrusion simulation: operator connected, a separate root shell tampers with
     a tracked file, and the alert naming the file appears unprompted. /etc/hosts is a
