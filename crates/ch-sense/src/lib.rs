@@ -37,8 +37,10 @@ pub struct Socket {
     pub pid: Option<i32>,
 }
 
-/// Build a fresh snapshot of the host.
+/// Build a fresh snapshot of the host by reading /proc. Read-only.
 pub fn snapshot() -> ch_common::Result<HostSnapshot> {
-    // M3: populate from /proc.
-    Ok(HostSnapshot::default())
+    Ok(HostSnapshot {
+        processes: procfs::read_processes()?,
+        sockets: procfs::read_sockets()?,
+    })
 }
