@@ -102,7 +102,12 @@ pub fn default_watchlist() -> Vec<String> {
         "/etc/httpd",
         "/etc/haproxy",
         "/etc/traefik",
-        "/var/www/html/wp-config.php",
+        // Web content roots - attackers deface/backdoor the served files, not just config.
+        // The integrity rescan walks these recursively (capped); narrow with watch if huge.
+        "/var/www",
+        "/usr/share/nginx/html",
+        "/srv/www",
+        "/srv/http",
         // Access / runtime security
         "/etc/teleport.yaml",
         "/etc/falco",
