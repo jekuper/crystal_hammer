@@ -110,10 +110,21 @@ async fn main() -> Result<()> {
         hops.push(Hop::Jump { host, port });
     }
 
-    let registry = ch_commands::model::ClientCommandRegistry::with_builtins();
-    let executor = Arc::new(LocalExecutor { registry });
-
-    connect(&target, &hops, executor).await.context("Failed to connect to agent")?;
+    match cli.command {
+        Some(Commands::Run { command }) => {
+            // Non-interactive one-shot: run a single agent command and exit with its code.
+            let code = ch_transport::run_command(&target, &hops, &command)
+                .await
+                .context("Failed to run command on agent")?;
+            std::process::exit(code);
+        }
+        _ => {
+            // Shell or no subcommand: the interactive operator console.
+            let registry = ch_commands::model::ClientCommandRegistry::with_builtins();
+            let executor = Arc::new(LocalExecutor { registry });
+            connect(&target, &hops, executor).await.context("Failed to connect to agent")?;
+        }
+    }
 
     Ok(())
 }
