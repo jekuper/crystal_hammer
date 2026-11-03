@@ -26,3 +26,5 @@ tabled.workspace = true
 hex.workspace = true
 sha2 = "0.11.0"
 crossterm.workspace = true
+ratatui.workspace = true
+serde.workspace = true
