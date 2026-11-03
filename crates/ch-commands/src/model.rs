@@ -14,6 +14,7 @@ use crate::response_command::{KickAgentCommand, KickClientCommand, KillAgentComm
 use crate::service_command::{ServiceAgentCommand, ServiceClientCommand};
 use crate::rotate_command::{RotateAgentCommand, RotateClientCommand};
 use crate::attribute_command::{AttributeAgentCommand, AttributeClientCommand};
+use crate::hunt_command::{HuntAgentCommand, HuntClientCommand};
 use crate::alerts_command::{AlertsAgentCommand, AlertsClientCommand};
 use crate::baseline_command::{BaselineAgentCommand, BaselineClientCommand, DiffAgentCommand, DiffClientCommand};
 use crate::sense_command::{
@@ -73,6 +74,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(ServiceAgentCommand::new()));
         r.register(Box::new(RotateAgentCommand::new()));
         r.register(Box::new(AttributeAgentCommand::new()));
+        r.register(Box::new(HuntAgentCommand::new()));
         r.register(Box::new(AlertsAgentCommand::new()));
         r.register(Box::new(BaselineAgentCommand::new()));
         r.register(Box::new(DiffAgentCommand::new()));
@@ -113,6 +115,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(ServiceClientCommand::new()));
         r.register(Box::new(RotateClientCommand::new()));
         r.register(Box::new(AttributeClientCommand::new()));
+        r.register(Box::new(HuntClientCommand::new()));
         r.register(Box::new(AlertsClientCommand::new()));
         r.register(Box::new(BaselineClientCommand::new()));
         r.register(Box::new(DiffClientCommand::new()));

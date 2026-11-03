@@ -57,6 +57,7 @@ impl Registry {
         let mut r = Registry { checks: Vec::new() };
         r.register(Box::new(checks::persistence::AuthorizedKeys::new()));
         r.register(Box::new(checks::stealth::PacketSocketHolders::new()));
+        r.register(Box::new(checks::stealth::AnomalousExe::new()));
         r
     }
 
@@ -71,5 +72,45 @@ impl Registry {
             .filter(|c| c.cadence() == cadence)
             .flat_map(|c| c.run(host))
             .collect()
+    }
+}
+
+/// One-shot hunt: snapshot the host and run every built-in check over it. Read-only -
+/// parses /proc and config, never writes, kills, or alters anything.
+pub fn hunt() -> Vec<Finding> {
+    let host = ch_sense::snapshot().unwrap_or_default();
+    let registry = Registry::with_builtins();
+    let mut findings = registry.run(Cadence::Once, &host);
+    findings.extend(registry.run(Cadence::Poll, &host));
+    findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checks_flag_anomalous_exe_and_stealth_sockets() {
+        let host = ch_sense::HostSnapshot {
+            processes: vec![ch_sense::Process {
+                pid: 7,
+                ppid: 1,
+                comm: "x".into(),
+                exe: "/tmp/x".into(),
+                loginuid: None,
+                anomalous_exe: true,
+            }],
+            sockets: vec![ch_sense::Socket {
+                proto: "packet".into(),
+                local: String::new(),
+                inode: 9,
+                pid: Some(7),
+            }],
+        };
+        let findings = Registry::with_builtins().run(Cadence::Poll, &host);
+        assert!(findings
+            .iter()
+            .any(|f| f.check == "stealth.anomalous_exe" && f.severity == Severity::Critical));
+        assert!(findings.iter().any(|f| f.check == "stealth.packet_sockets"));
     }
 }
