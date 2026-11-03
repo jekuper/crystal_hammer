@@ -150,7 +150,10 @@ macro_rules! simple_client {
                 Vec::new()
             }
             async fn execute(&self, _e: &dyn ClientCommandExecutor, _args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
-                let args: Vec<String> = $args.iter().map(|s: &&str| s.to_string()).collect();
+                // Bind to a typed local first: `$args.iter()` on a bare `&[..]` literal
+                // parses as `&(array.iter())` (unary & is looser than method call).
+                let fixed: &[&str] = $args;
+                let args: Vec<String> = fixed.iter().map(|s| s.to_string()).collect();
                 run_remote(ctx, $remote, &args).await
             }
         }
