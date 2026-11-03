@@ -177,8 +177,9 @@ impl russh::client::Handler for ClientHandler {
     }
 }
 
-/// Connect to an agent: knock, then russh handshake with host-key pinning.
-pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientCommandExecutor>) -> Result<()> {
+/// Knock, run the russh handshake with host-key pinning, and authenticate. Returns the
+/// live session, shared by the interactive console and the non-interactive `run` path.
+async fn establish(target: &Target, via: &[Hop]) -> Result<Handle<ClientHandler>> {
     tracing::info!("Connecting to {}:{}", target.host, target.port);
 
     let keypair = load_operator_keypair()?;
@@ -197,7 +198,6 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
     tracing::info!("Connection established, transitioning stream to russh");
 
     let config = Arc::new(russh::client::Config::default());
-
     let handler = ClientHandler {
         expected_key: keypair.public,
     };
@@ -207,9 +207,7 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     let secret_bytes = keypair.secret.to_bytes();
-    let key_pair = russh_keys::key::KeyPair::Ed25519(
-        ed25519_dalek::SigningKey::from_bytes(&secret_bytes)
-    );
+    let key_pair = russh_keys::key::KeyPair::Ed25519(ed25519_dalek::SigningKey::from_bytes(&secret_bytes));
 
     let auth_res = session
         .authenticate_publickey("root", Arc::new(key_pair))
@@ -221,12 +219,51 @@ pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientComma
     }
 
     tracing::info!("Authenticated SSH session established");
+    Ok(session)
+}
 
+/// Connect to an agent and run the interactive operator console.
+pub async fn connect(target: &Target, via: &[Hop], executor: Arc<dyn ClientCommandExecutor>) -> Result<()> {
+    let session = establish(target, via).await?;
     run_operator_repl(session, executor)
         .await
         .map_err(|e| ch_common::Error::Other(e.to_string()))?;
-
     Ok(())
+}
+
+/// Connect, run a single agent command non-interactively, stream its output, and exit.
+/// `command` is the raw command line the agent's executor routes (e.g. "info host").
+/// Returns the command's exit status (0 unless the agent reported non-zero).
+pub async fn run_command(target: &Target, via: &[Hop], command: &str) -> Result<i32> {
+    let session = establish(target, via).await?;
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| ch_common::Error::Other(e.to_string()))?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .map_err(|e| ch_common::Error::Other(e.to_string()))?;
+
+    let mut exit = 0i32;
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { ref data } => {
+                print!("{}", String::from_utf8_lossy(data));
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            russh::ChannelMsg::ExtendedData { ref data, .. } => {
+                eprint!("{}", String::from_utf8_lossy(data));
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+            }
+            russh::ChannelMsg::ExitStatus { exit_status } => exit = exit_status as i32,
+            russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok(exit)
 }
 
 async fn run_operator_repl(

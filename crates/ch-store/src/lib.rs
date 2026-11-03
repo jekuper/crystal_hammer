@@ -22,6 +22,8 @@ const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 // versions while operator edits persist (a removed default is tombstoned).
 const WL_ADD: TableDefinition<&str, u8> = TableDefinition::new("watchlist_add");
 const WL_REMOVE: TableDefinition<&str, u8> = TableDefinition::new("watchlist_remove");
+// T0 integrity baseline: watched-file path -> content hash (hex).
+const BASELINE: TableDefinition<&str, &str> = TableDefinition::new("baseline");
 
 const META_LAST_HASH: &str = "last_hash";
 
@@ -54,6 +56,7 @@ impl Store {
             w.open_table(META).map_err(store_err)?;
             w.open_table(WL_ADD).map_err(store_err)?;
             w.open_table(WL_REMOVE).map_err(store_err)?;
+            w.open_table(BASELINE).map_err(store_err)?;
         }
         w.commit().map_err(store_err)?;
         Ok(Store { db })
@@ -170,6 +173,34 @@ impl Store {
         }
         Ok(set.into_iter().collect())
     }
+
+    // ---- Integrity baseline ---------------------------------------------
+
+    /// Replace the baseline with `entries` (path -> content-hash hex).
+    pub fn set_baseline(&self, entries: &[(String, String)]) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        w.delete_table(BASELINE).map_err(store_err)?;
+        {
+            let mut t = w.open_table(BASELINE).map_err(store_err)?;
+            for (path, hash) in entries {
+                t.insert(path.as_str(), hash.as_str()).map_err(store_err)?;
+            }
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// The stored baseline as (path, hash) pairs; empty if none was taken.
+    pub fn baseline(&self) -> Result<Vec<(String, String)>> {
+        let r = self.db.begin_read().map_err(store_err)?;
+        let t = r.open_table(BASELINE).map_err(store_err)?;
+        let mut out = Vec::new();
+        for item in t.iter().map_err(store_err)? {
+            let (k, v) = item.map_err(store_err)?;
+            out.push((k.value().to_string(), v.value().to_string()));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +259,24 @@ mod tests {
         s.add_watch("/etc/passwd").unwrap();
         let eff = s.effective_watchlist(vec!["/etc/passwd".into()]).unwrap();
         assert!(eff.contains(&"/etc/passwd".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baseline_round_trips_and_replaces() {
+        let dir = tmp();
+        let s = Store::open(&dir).unwrap();
+        assert!(s.baseline().unwrap().is_empty());
+
+        s.set_baseline(&[("/a".into(), "h1".into()), ("/b".into(), "h2".into())]).unwrap();
+        let mut got = s.baseline().unwrap();
+        got.sort();
+        assert_eq!(got, vec![("/a".to_string(), "h1".to_string()), ("/b".to_string(), "h2".to_string())]);
+
+        // set_baseline replaces wholesale.
+        s.set_baseline(&[("/c".into(), "h3".into())]).unwrap();
+        assert_eq!(s.baseline().unwrap(), vec![("/c".to_string(), "h3".to_string())]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

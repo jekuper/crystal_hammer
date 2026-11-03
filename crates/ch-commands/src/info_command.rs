@@ -503,7 +503,7 @@ fn parse_listeners_from_file(path: &str, proto: &str, is_v6: bool) -> Vec<Listen
     out
 }
 
-fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
+pub(crate) fn get_inode_to_process_map() -> HashMap<u64, (u32, String)> {
     let mut map = HashMap::new();
 
     let proc_dir = match fs::read_dir("/proc") {
@@ -727,7 +727,7 @@ fn list_all_procs_with_ppid_and_tty() -> Vec<(i32, i32, String)> {
     result
 }
 
-fn get_uid_to_username_map() -> HashMap<u32, String> {
+pub(crate) fn get_uid_to_username_map() -> HashMap<u32, String> {
     let mut map = HashMap::new();
     if let Ok(content) = fs::read_to_string("/etc/passwd") {
         for line in content.lines() {
@@ -787,7 +787,7 @@ fn get_recent_auth_failures_log() -> Vec<String> {
 /// Parses the hex-encoded IP from /proc/net/{tcp,udp}[6].
 /// IPv4 fields are 8 hex chars (little-endian 32-bit).
 /// IPv6 fields are 32 hex chars (four little-endian 32-bit words).
-fn parse_hex_ip(hex: &str, is_v6: bool) -> Option<String> {
+pub(crate) fn parse_hex_ip(hex: &str, is_v6: bool) -> Option<String> {
     if is_v6 {
         if hex.len() != 32 {
             return None;
