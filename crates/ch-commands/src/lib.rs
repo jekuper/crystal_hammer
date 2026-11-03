@@ -17,3 +17,4 @@ pub mod service_command;
 pub mod rotate_command;
 pub mod attribute_command;
 pub mod baseline_command;
+pub mod sense_command;

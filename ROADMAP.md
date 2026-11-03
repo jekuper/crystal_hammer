@@ -160,8 +160,9 @@ Delivers persistence of access and scale.
 - **[done]** Multi-mechanism idempotent self-preservation installed at T0.
 - **[todo]** Self-update / redeploy of a fixed binary mid-game (the `Update` wire type and
   `restart` command exist but the swap is unwired).
-- **[todo]** Non-interactive one-shot mode (`run <cmd>`) and multi-host broadcast/fan-out
-  (the client CLI parses `run`/`shell` subcommands but does not act on them yet).
+- **[todo]** Non-interactive one-shot mode (`run <cmd>`).
+- ~~multi-host broadcast/fan-out (one command across a fleet of agents at once).~~
+  **[cancelled]** not needed.
 
 **Done when:** removing one persistence mechanism doesn't cut access, fixes can be pushed
 mid-game, and one command runs across the fleet.
