@@ -111,6 +111,17 @@ impl Highlighter for ConsoleHelper {
         // Dim gray, reset afterwards
         Cow::Owned(format!("\x1b[90m{hint}\x1b[0m"))
     }
+
+    // Color the operator prompt for display only; rustyline measures width from the plain
+    // prompt string, so the cursor stays aligned.
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, _default: bool) -> Cow<'b, str> {
+        if prompt.contains("hammer") {
+            // magenta crystal facet, cyan "hammer", green chevron
+            Cow::Owned("\x1b[1;35m\u{25c8}\x1b[0m \x1b[1;36mhammer\x1b[1;32m\u{276f}\x1b[0m ".to_string())
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
 }
 
 impl Validator for ConsoleHelper {}
@@ -320,10 +331,10 @@ async fn run_operator_repl(
 
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
-    // Colored prompt: a bold-green dot + bold-cyan "hammer>" so it stands out in a wall of
-    // alert text. \x01/\x02 wrap the non-printing escapes so rustyline measures width right.
-    const PROMPT: &str =
-        "\x01\x1b[1;32m\x02\u{25cf}\x01\x1b[0m\x02 \x01\x1b[1;36m\x02hammer>\x01\x1b[0m\x02 ";
+    // Plain prompt so rustyline measures its width correctly; the color is applied by
+    // ConsoleHelper::highlight_prompt for display only (rustyline, unlike GNU readline,
+    // does not use \x01/\x02 width markers). Glyphs: crystal facet + chevron.
+    const PROMPT: &str = "\u{25c8} hammer\u{276f} ";
 
     loop {
         // readline() blocks; run it on the blocking pool so the async runtime stays free
