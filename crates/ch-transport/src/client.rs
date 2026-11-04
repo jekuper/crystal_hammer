@@ -320,11 +320,16 @@ async fn run_operator_repl(
 
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
+    // Colored prompt: a bold-green dot + bold-cyan "hammer>" so it stands out in a wall of
+    // alert text. \x01/\x02 wrap the non-printing escapes so rustyline measures width right.
+    const PROMPT: &str =
+        "\x01\x1b[1;32m\x02\u{25cf}\x01\x1b[0m\x02 \x01\x1b[1;36m\x02hammer>\x01\x1b[0m\x02 ";
+
     loop {
         // readline() blocks; run it on the blocking pool so the async runtime stays free
         // to drive the live alert reader while the operator sits at the prompt.
         let (returned_rl, readline) = tokio::task::spawn_blocking(move || {
-            let res = rl.readline("hammer> ");
+            let res = rl.readline(PROMPT);
             (rl, res)
         })
         .await
