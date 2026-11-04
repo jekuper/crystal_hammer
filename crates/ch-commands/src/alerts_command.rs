@@ -664,7 +664,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         } else {
             vec![Constraint::Min(5), Constraint::Length(1)]
         })
-        .split(f.size());
+        .split(f.area());
 
     if app.help {
         draw_help(f, chunks[0]);
