@@ -59,13 +59,36 @@ impl AgentCommand for AlertsAgentCommand {
         };
         match sub {
             Some("dump") => {
-                let since = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let limit = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
-                let acked = store.acked_cursors().unwrap_or_default();
-                for rec in store.since(since, limit).unwrap_or_default() {
-                    if rec.kind != "alert" {
-                        continue;
+                // Args in any order: a time window (45s/30m/2h/1d or "all") and/or a bare
+                // count limit. Default: everything.
+                let mut window_secs: Option<u64> = None; // None = all time
+                let mut limit = usize::MAX;
+                for a in &args[1..] {
+                    if a == "all" {
+                        window_secs = None;
+                    } else if let Some(secs) = parse_window(a) {
+                        window_secs = Some(secs);
+                    } else if let Ok(n) = a.parse::<usize>() {
+                        limit = n;
                     }
+                }
+                let cutoff = window_secs.map(|w| unix_now().saturating_sub(w));
+                let acked = store.acked_cursors().unwrap_or_default();
+                // Collect matches in chronological order, then keep only the newest `limit`.
+                let mut matched: Vec<_> = store
+                    .since(0, usize::MAX)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|rec| rec.kind == "alert")
+                    .filter(|rec| match cutoff {
+                        None => true,
+                        Some(c) => rec.body.get("unix_time").and_then(|v| v.as_u64()).unwrap_or(0) >= c,
+                    })
+                    .collect();
+                if matched.len() > limit {
+                    matched.drain(0..matched.len() - limit);
+                }
+                for rec in matched {
                     let line = serde_json::json!({
                         "cursor": rec.cursor,
                         "alert": rec.body,
@@ -98,12 +121,36 @@ impl AgentCommand for AlertsAgentCommand {
             }
             _ => {
                 ctx.stdout
-                    .write_all(b"usage: alerts dump [since] [limit] | alerts ack|unack <cursor>...\n")
+                    .write_all(b"usage: alerts dump [window] [limit] | alerts ack|unack <cursor>...\n")
                     .await?;
             }
         }
         Ok(())
     }
+}
+
+/// Seconds since the Unix epoch, now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse a relative time window like "45s", "30m", "2h", "1d" into seconds.
+/// Returns None when the string is not a `<number><unit>` window (e.g. a bare count).
+fn parse_window(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: u64 = num.parse().ok()?;
+    let secs = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    Some(n.saturating_mul(secs))
 }
 
 // =============================================================================
@@ -126,7 +173,7 @@ impl ClientCommand for AlertsClientCommand {
         "Browse past alerts (interactive)"
     }
     fn help(&self) -> &'static str {
-        "Usage: alerts [dump [since] [limit] | ack|unack <cursor>...]\n\n\
+        "Usage: alerts [dump [window] [limit] | ack|unack <cursor>...]\n\n\
         With no args: opens an interactive browser over the alert history.\n\
         Press '?' inside it for the full key list. Short version:\n\
           move    up/down pgup/pgdn home/end       filter  s sev  f kind  / search  h hide-acked\n\
@@ -134,8 +181,15 @@ impl ClientCommand for AlertsClientCommand {
           act     p pin to console   a attribute   w watch   x ack   k kill   e evict(kick)\n\
           quit    q  (pending ack marks are saved on quit)\n\
         'p' prints the full alert into the console and closes, so you keep it without reopening.\n\
-        'k'/'e' ask for confirmation (default no) before closing and acting.\n\
-        'alerts dump' prints the history as NDJSON; 'alerts ack <cursor>' marks alerts handled."
+        'k'/'e' ask for confirmation (default no) before closing and acting.\n\n\
+        alerts dump [window] [limit]   print the history as NDJSON (for scripting / piping).\n\
+          window: <n><unit> where unit is s/m/h/d (e.g. 45s, 30m, 2h, 1d), or 'all'.\n\
+                  a bare number with no unit is a count, not a window.\n\
+          examples:  alerts dump          all stored alerts\n\
+                     alerts dump 30m       the past 30 minutes\n\
+                     alerts dump 2h 50     the past 2 hours, newest 50\n\
+                     alerts dump 100       the newest 100, any time\n\
+        alerts ack|unack <cursor>...   mark alerts handled (cursor is the 'cursor' field in dump)."
     }
     fn complete_arg(&self, _p: &[&str], _w: &str, _c: &rustyline::Context<'_>, _f: &FilenameCompleter) -> Vec<Pair> {
         Vec::new()
@@ -186,7 +240,7 @@ async fn fetch_alerts(session: &mut russh::client::Handle<ch_transport::client::
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
     channel
-        .exec(true, b"alerts dump 0 100000")
+        .exec(true, b"alerts dump")
         .await
         .map_err(|e| Error::Other(e.to_string()))?;
 
@@ -808,4 +862,21 @@ fn draw_footer(app: &App) -> Line<'static> {
         Span::styled("q", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw(" quit"),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_window;
+
+    #[test]
+    fn windows_parse() {
+        assert_eq!(parse_window("45s"), Some(45));
+        assert_eq!(parse_window("30m"), Some(1800));
+        assert_eq!(parse_window("2h"), Some(7200));
+        assert_eq!(parse_window("1d"), Some(86_400));
+        // bare counts and junk are not windows
+        assert_eq!(parse_window("100"), None);
+        assert_eq!(parse_window("s"), None);
+        assert_eq!(parse_window(""), None);
+    }
 }

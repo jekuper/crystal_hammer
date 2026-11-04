@@ -14,7 +14,7 @@ def test_alerts_dump(agent):
     last = {}
 
     def dumped():
-        out, err, code = run_client(agent, b"alerts dump 0 1000\nexit\n")
+        out, err, code = run_client(agent, b"alerts dump\nexit\n")
         last.update(out=out, err=err, code=code)
         return code == 0 and "DUMP_PROBE_123" in out and "cursor" in out
 
