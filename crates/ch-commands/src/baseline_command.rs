@@ -4,11 +4,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs;
-use std::path::PathBuf;
 
 use async_trait::async_trait;
-use ch_common::{Hash, Result};
+use ch_common::Result;
 use ch_transport::ClientCommandExecutor;
 use rustyline::completion::{FilenameCompleter, Pair};
 use tokio::io::AsyncWriteExt;
@@ -16,39 +14,8 @@ use tokio::io::AsyncWriteExt;
 use crate::model::{AgentCommand, AgentCommandContext, ClientCommand, ClientCommandContext};
 use crate::response_command::run_remote;
 
-const MAX_DEPTH: usize = 8;
-const MAX_FILES: usize = 20_000;
 /// Cap how many paths each change class lists, so a big diff stays readable.
 const LIST_CAP: usize = 100;
-
-/// Hash every regular file under the watchlist. Follows a symlink only if it is the
-/// watchlist entry itself (depth 0), matching the live tracker's rescan.
-fn hash_watchlist(paths: &[String]) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for root in paths {
-        let mut stack = vec![(PathBuf::from(root), 0usize)];
-        while let Some((p, depth)) = stack.pop() {
-            if out.len() >= MAX_FILES {
-                return out;
-            }
-            let meta = if depth == 0 { fs::metadata(&p) } else { fs::symlink_metadata(&p) };
-            let Ok(meta) = meta else { continue };
-            if meta.is_dir() {
-                if depth >= MAX_DEPTH {
-                    continue;
-                }
-                if let Ok(entries) = fs::read_dir(&p) {
-                    stack.extend(entries.flatten().map(|e| (e.path(), depth + 1)));
-                }
-            } else if meta.is_file() {
-                if let Ok(bytes) = fs::read(&p) {
-                    out.insert(p.display().to_string(), Hash::of(&bytes).to_string());
-                }
-            }
-        }
-    }
-    out
-}
 
 fn section(report: &mut String, title: &str, items: &[&String]) {
     let _ = writeln!(report, "{} ({}):", title, items.len());
@@ -72,23 +39,26 @@ impl AgentCommand for BaselineAgentCommand {
     fn name(&self) -> &'static str {
         "baseline"
     }
-    async fn execute(&self, _args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
+    async fn execute(&self, args: Vec<String>, mut ctx: AgentCommandContext) -> Result<()> {
         let Some(store) = ctx.store.clone() else {
             ctx.stdout.write_all(b"state store unavailable; cannot take a baseline\n").await?;
             return Ok(());
         };
-        let paths = ctx.audit.list();
-        let map = hash_watchlist(&paths);
-        let entries: Vec<(String, String)> = map.into_iter().collect();
-        let n = entries.len();
-        match store.set_baseline(&entries) {
-            Ok(()) => {
-                ctx.stdout
-                    .write_all(format!("baseline captured: {n} file(s) hashed across {} watched path(s)\n", paths.len()).as_bytes())
-                    .await?
-            }
-            Err(e) => ctx.stdout.write_all(format!("failed to store baseline: {e}\n").as_bytes()).await?,
+        // `baseline flush` discards the stored baseline; `baseline` (re)takes it.
+        if args.first().map(String::as_str) == Some("flush") {
+            let msg = match store.clear_baseline() {
+                Ok(()) => "baseline flushed\n".to_string(),
+                Err(e) => format!("failed to flush baseline: {e}\n"),
+            };
+            ctx.stdout.write_all(msg.as_bytes()).await?;
+            return Ok(());
         }
+        let paths = ctx.audit.list();
+        let msg = match store.take_baseline(&paths) {
+            Ok(n) => format!("baseline captured: {n} file(s) hashed across {} watched path(s)\n", paths.len()),
+            Err(e) => format!("failed to store baseline: {e}\n"),
+        };
+        ctx.stdout.write_all(msg.as_bytes()).await?;
         Ok(())
     }
 }
@@ -122,7 +92,7 @@ impl AgentCommand for DiffAgentCommand {
             }
         };
 
-        let cur = hash_watchlist(&ctx.audit.list());
+        let cur = ch_store::hash_paths(&ctx.audit.list());
         let mut modified = Vec::new();
         let mut added = Vec::new();
         let mut removed = Vec::new();
@@ -172,9 +142,10 @@ impl ClientCommand for BaselineClientCommand {
         "Snapshot known-good file hashes"
     }
     fn help(&self) -> &'static str {
-        "Usage: baseline\n\n\
-        Hashes every watched file and stores it as the known-good baseline. Run at T0, then\n\
-        use 'diff' later to see what changed."
+        "Usage: baseline [flush]\n\n\
+        Hashes every watched file and stores it as the known-good baseline (also taken\n\
+        automatically ~10s after the agent starts). 'baseline flush' discards it. Use\n\
+        'diff' to see what changed since."
     }
     fn complete_arg(&self, _p: &[&str], _w: &str, _c: &rustyline::Context<'_>, _f: &FilenameCompleter) -> Vec<Pair> {
         Vec::new()

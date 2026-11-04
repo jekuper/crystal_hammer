@@ -6,13 +6,47 @@
 
 pub mod evidence;
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use ch_common::{Error, Result};
+use ch_common::{Error, Hash, Result};
 use redb::{Database, ReadableTable, TableDefinition};
 
 use evidence::Record;
+
+/// Depth/file caps for the baseline walk, matching the live integrity rescan.
+const BASELINE_MAX_DEPTH: usize = 8;
+const BASELINE_MAX_FILES: usize = 20_000;
+
+/// BLAKE3-hash every regular file under `paths` (recursively, capped). Follows a symlink
+/// only when it is a top-level entry. Shared by the `baseline`/`diff` command and the
+/// agent's auto-baseline so both hash identically.
+pub fn hash_paths(paths: &[String]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for root in paths {
+        let mut stack = vec![(PathBuf::from(root), 0usize)];
+        while let Some((p, depth)) = stack.pop() {
+            if out.len() >= BASELINE_MAX_FILES {
+                return out;
+            }
+            let meta = if depth == 0 { std::fs::metadata(&p) } else { std::fs::symlink_metadata(&p) };
+            let Ok(meta) = meta else { continue };
+            if meta.is_dir() {
+                if depth >= BASELINE_MAX_DEPTH {
+                    continue;
+                }
+                if let Ok(entries) = std::fs::read_dir(&p) {
+                    stack.extend(entries.flatten().map(|e| (e.path(), depth + 1)));
+                }
+            } else if meta.is_file() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    out.insert(p.display().to_string(), Hash::of(&bytes).to_string());
+                }
+            }
+        }
+    }
+    out
+}
 
 // Evidence log, keyed by monotonic cursor; value is the JSON-encoded Record.
 const EVIDENCE: TableDefinition<u64, &[u8]> = TableDefinition::new("evidence");
@@ -185,6 +219,25 @@ impl Store {
             for (path, hash) in entries {
                 t.insert(path.as_str(), hash.as_str()).map_err(store_err)?;
             }
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Hash the given paths now and store the result as the baseline. Returns the count.
+    pub fn take_baseline(&self, paths: &[String]) -> Result<usize> {
+        let entries: Vec<(String, String)> = hash_paths(paths).into_iter().collect();
+        let n = entries.len();
+        self.set_baseline(&entries)?;
+        Ok(n)
+    }
+
+    /// Discard the stored baseline (flush).
+    pub fn clear_baseline(&self) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        w.delete_table(BASELINE).map_err(store_err)?;
+        {
+            w.open_table(BASELINE).map_err(store_err)?;
         }
         w.commit().map_err(store_err)?;
         Ok(())

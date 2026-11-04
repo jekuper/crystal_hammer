@@ -160,6 +160,20 @@ async fn main() -> Result<()> {
     // operator is connected. Also keeps a live subscriber so the engine always records.
     if let Some(store) = &store {
         spawn_evidence_writer(store.clone(), audit.subscribe());
+
+        // Auto-capture the integrity baseline ~10s after start (lets the watchlist settle),
+        // so `diff` works out of the box. Operators can retake/flush it with `baseline`.
+        let bstore = store.clone();
+        let baudit = audit.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let paths = baudit.list();
+            match tokio::task::spawn_blocking(move || bstore.take_baseline(&paths)).await {
+                Ok(Ok(n)) => tracing::info!("Integrity baseline captured: {} file(s).", n),
+                Ok(Err(e)) => tracing::warn!("Auto-baseline failed: {}", e),
+                Err(e) => tracing::warn!("Auto-baseline task panicked: {}", e),
+            }
+        });
     }
 
 
