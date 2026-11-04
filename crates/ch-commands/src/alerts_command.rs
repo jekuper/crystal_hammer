@@ -119,14 +119,34 @@ impl AgentCommand for AlertsAgentCommand {
                 let verb = if on { "acknowledged" } else { "unacknowledged" };
                 ctx.stdout.write_all(format!("{verb} {n} alert(s)\n").as_bytes()).await?;
             }
+            // flush wipes the whole stored alert history (the client confirms first).
+            Some("flush") => {
+                match store.clear_alerts() {
+                    Ok(()) => ctx.stdout.write_all(b"alert history flushed\n").await?,
+                    Err(e) => ctx.stdout.write_all(format!("flush failed: {e}\n").as_bytes()).await?,
+                }
+            }
             _ => {
                 ctx.stdout
-                    .write_all(b"usage: alerts dump [window] [limit] | alerts ack|unack <cursor>...\n")
+                    .write_all(b"usage: alerts dump [window] [limit] | alerts ack|unack <cursor>... | alerts flush\n")
                     .await?;
             }
         }
         Ok(())
     }
+}
+
+/// Prompt on the console for a yes/no confirmation, defaulting to no. Returns true only
+/// if the operator types a line starting with 'y'/'Y'.
+fn confirm_stdin(prompt: &str) -> bool {
+    use std::io::Write;
+    print!("{prompt} [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim_start().chars().next(), Some('y') | Some('Y'))
 }
 
 /// Seconds since the Unix epoch, now.
@@ -189,12 +209,21 @@ impl ClientCommand for AlertsClientCommand {
                      alerts dump 30m       the past 30 minutes\n\
                      alerts dump 2h 50     the past 2 hours, newest 50\n\
                      alerts dump 100       the newest 100, any time\n\
-        alerts ack|unack <cursor>...   mark alerts handled (cursor is the 'cursor' field in dump)."
+        alerts ack|unack <cursor>...   mark alerts handled (cursor is the 'cursor' field in dump).\n\
+        alerts flush                   delete ALL stored alerts (asks for confirmation)."
     }
     fn complete_arg(&self, _p: &[&str], _w: &str, _c: &rustyline::Context<'_>, _f: &FilenameCompleter) -> Vec<Pair> {
         Vec::new()
     }
     async fn execute(&self, _e: &dyn ClientCommandExecutor, args: &[String], ctx: ClientCommandContext<'_>) -> Result<()> {
+        // flush deletes the whole stored history; confirm first, defaulting to no.
+        if args.first().map(String::as_str) == Some("flush") {
+            if !confirm_stdin("This permanently deletes ALL stored alerts. Flush?") {
+                println!("cancelled");
+                return Ok(());
+            }
+            return run_remote(ctx, "alerts", &["flush".to_string()]).await;
+        }
         if matches!(args.first().map(String::as_str), Some("dump") | Some("ack") | Some("unack")) {
             return run_remote(ctx, "alerts", args).await; // non-interactive passthrough
         }
