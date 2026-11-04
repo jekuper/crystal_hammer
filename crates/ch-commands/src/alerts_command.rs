@@ -361,6 +361,18 @@ fn who(a: &Alert) -> String {
     }
 }
 
+/// Best identifier to evict the actor by: the audit login if known, else the resolved
+/// username, else the raw uid. Empty when nothing identifies a user (e.g. uid 0 unset).
+fn evict_target(a: &Alert) -> Option<String> {
+    let act = &a.actor;
+    for cand in [&act.login, &act.uname, &act.uid] {
+        if !cand.is_empty() {
+            return Some(cand.clone());
+        }
+    }
+    None
+}
+
 fn sev_label(a: &Alert) -> &'static str {
     use ch_common::proto::AlertSeverity::*;
     match a.severity {
@@ -530,8 +542,8 @@ fn console_block(row: &DumpRow, acked: bool) -> String {
         acts.push(format!("attribute {}", act.pid));
         acts.push(format!("kill {}", act.pid));
     }
-    if !act.login.is_empty() {
-        acts.push(format!("kick {}", act.login));
+    if let Some(user) = evict_target(a) {
+        acts.push(format!("kick {}", user));
     }
     if !a.path.is_empty() {
         acts.push(format!("watch add {}", a.path));
@@ -653,14 +665,13 @@ fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut Ap
                     }
                 }
             }
-            // e: evict (kick) the alert's login user, behind a confirmation.
+            // e: evict (kick) the alert's user, behind a confirmation.
             KeyCode::Char('e') => {
                 if let Some(a) = app.selected_alert() {
-                    if !a.actor.login.is_empty() {
-                        let login = a.actor.login.clone();
+                    if let Some(user) = evict_target(a) {
                         app.confirm = Some(Confirm {
-                            prompt: format!("evict (kick) user {login}?"),
-                            outcome: Outcome::Exec("kick".to_string(), vec![login]),
+                            prompt: format!("evict (kick) user {user}?"),
+                            outcome: Outcome::Exec("kick".to_string(), vec![user]),
                         });
                     }
                 }
