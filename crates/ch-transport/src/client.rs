@@ -197,7 +197,12 @@ async fn establish(target: &Target, via: &[Hop]) -> Result<Handle<ClientHandler>
 
     tracing::info!("Connection established, transitioning stream to russh");
 
-    let config = Arc::new(russh::client::Config::default());
+    let mut config = russh::client::Config::default();
+    // Send SSH keepalives so an idle session (just streaming alerts) isn't dropped.
+    config.keepalive_interval = Some(std::time::Duration::from_secs(20));
+    config.keepalive_max = 10;
+    config.inactivity_timeout = None;
+    let config = Arc::new(config);
     let handler = ClientHandler {
         expected_key: keypair.public,
     };
