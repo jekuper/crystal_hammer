@@ -96,8 +96,11 @@ impl ClientCommand for AlertsClientCommand {
     fn help(&self) -> &'static str {
         "Usage: alerts [dump [since] [limit]]\n\n\
         With no args: opens an interactive browser over the alert history.\n\
-          up/down pgup/pgdn home/end  move     s severity   k kind   t sort\n\
-          /  search    Enter  details          q quit\n\
+          up/down pgup/pgdn home/end  move     s severity   f kind   t sort   / search\n\
+          Enter  details                       p pin to console   a attribute pid   w watch path\n\
+          q  quit\n\
+        'p' prints the selected alert into the console and closes, so you keep it without\n\
+        reopening. 'a'/'w' close and act on it (dossier / add to watchlist).\n\
         'alerts dump' prints the history as NDJSON (for scripting)."
     }
     fn complete_arg(&self, _p: &[&str], _w: &str, _c: &rustyline::Context<'_>, _f: &FilenameCompleter) -> Vec<Pair> {
@@ -113,13 +116,34 @@ impl ClientCommand for AlertsClientCommand {
             println!("No alerts recorded yet.");
             return Ok(());
         }
-        // The TUI is synchronous (raw mode); run it off the async runtime.
-        tokio::task::spawn_blocking(move || run_tui(rows))
+        // The TUI is synchronous (raw mode); run it off the async runtime. It returns an
+        // optional outcome chosen by the operator before closing.
+        let outcome = tokio::task::spawn_blocking(move || run_tui(rows))
             .await
             .map_err(|e| Error::Other(e.to_string()))?
             .map_err(|e| Error::Other(e.to_string()))?;
+        match outcome {
+            // Pin the alert into the console scroll so the operator keeps it after closing.
+            Some(Outcome::Print(block)) => {
+                println!("{block}");
+            }
+            // Act on the alert: run a follow-up command against the agent, output to console.
+            Some(Outcome::Exec(cmd, cargs)) => {
+                println!("\u{25c8} running: {cmd} {}", cargs.join(" "));
+                run_remote(ctx, &cmd, &cargs).await?;
+            }
+            None => {}
+        }
         Ok(())
     }
+}
+
+/// What the TUI asks the client to do after it closes.
+enum Outcome {
+    /// Print this text block into the console flow.
+    Print(String),
+    /// Run this agent command (name + args) and show its output in the console.
+    Exec(String, Vec<String>),
 }
 
 async fn fetch_alerts(session: &mut russh::client::Handle<ch_transport::client::ClientHandler>) -> Result<Vec<DumpRow>> {
@@ -330,7 +354,34 @@ impl App {
     }
 }
 
-fn run_tui(rows: Vec<DumpRow>) -> io::Result<()> {
+/// Build the console block printed when an alert is pinned, including suggested follow-ups.
+fn console_block(a: &Alert) -> String {
+    let mut s = String::from("\n\u{25c8} pinned alert ---------------------------------------\n");
+    s += &format!("  time:   {} (unix {})\n", hms(a.unix_time), a.unix_time);
+    s += &format!("  sev:    {}\n", sev_label(a));
+    s += &format!("  kind:   {}\n", a.kind);
+    s += &format!("  path:   {}\n", if a.path.is_empty() { "-" } else { &a.path });
+    s += &format!("  detail: {}\n", a.detail);
+    s += &format!("  who:    {}\n", who(a));
+    let mut acts = Vec::new();
+    if a.actor.pid != 0 {
+        acts.push(format!("attribute {}", a.actor.pid));
+        acts.push(format!("kill {}", a.actor.pid));
+    }
+    if !a.actor.login.is_empty() {
+        acts.push(format!("kick {}", a.actor.login));
+    }
+    if !a.path.is_empty() {
+        acts.push(format!("watch add {}", a.path));
+    }
+    if !acts.is_empty() {
+        s += &format!("  next:   {}\n", acts.join("   |   "));
+    }
+    s += "------------------------------------------------------\n";
+    s
+}
+
+fn run_tui(rows: Vec<DumpRow>) -> io::Result<Option<Outcome>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -345,7 +396,7 @@ fn run_tui(rows: Vec<DumpRow>) -> io::Result<()> {
     result
 }
 
-fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> io::Result<Option<Outcome>> {
     loop {
         term.draw(|f| draw(f, app))?;
         if !event::poll(std::time::Duration::from_millis(250))? {
@@ -373,12 +424,12 @@ fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut Ap
         }
 
         match key.code {
-            KeyCode::Char('q') => return Ok(()),
+            KeyCode::Char('q') => return Ok(None),
             KeyCode::Esc => {
                 if app.detail {
                     app.detail = false;
                 } else {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             KeyCode::Up => app.move_sel(-1),
@@ -388,11 +439,33 @@ fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut Ap
             KeyCode::Home => app.state.select((!app.view.is_empty()).then_some(0)),
             KeyCode::End => app.move_sel(app.view.len() as isize),
             KeyCode::Enter => app.detail = !app.detail,
+            // p: pin the selected alert to the console and close.
+            KeyCode::Char('p') => {
+                if let Some(a) = app.selected_alert().cloned() {
+                    return Ok(Some(Outcome::Print(console_block(&a))));
+                }
+            }
+            // a: close and run the dossier (attribute) on the alert's pid.
+            KeyCode::Char('a') => {
+                if let Some(a) = app.selected_alert() {
+                    if a.actor.pid != 0 {
+                        return Ok(Some(Outcome::Exec("attribute".to_string(), vec![a.actor.pid.to_string()])));
+                    }
+                }
+            }
+            // w: close and add the alert's path to the watchlist.
+            KeyCode::Char('w') => {
+                if let Some(a) = app.selected_alert() {
+                    if !a.path.is_empty() {
+                        return Ok(Some(Outcome::Exec("watch".to_string(), vec!["add".to_string(), a.path.clone()])));
+                    }
+                }
+            }
             KeyCode::Char('s') => {
                 app.sev = app.sev.next();
                 app.recompute();
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('f') => {
                 app.kind_idx = (app.kind_idx + 1) % (app.kinds.len() + 1);
                 app.recompute();
             }
@@ -490,7 +563,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         ])
     } else {
         Line::from(format!(
-            "sev:{}  kind:{}  sort:{}  search:{}  | s/k/t cycle  / search  Enter detail  q quit",
+            "sev:{}  kind:{}  sort:{}  search:{}  | s/f/t cycle  / search  Enter detail  p pin  a attribute  w watch  q quit",
             app.sev.label(),
             app.kind_filter().unwrap_or("all"),
             app.sort.label(),
