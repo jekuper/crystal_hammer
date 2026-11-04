@@ -58,6 +58,9 @@ const WL_ADD: TableDefinition<&str, u8> = TableDefinition::new("watchlist_add");
 const WL_REMOVE: TableDefinition<&str, u8> = TableDefinition::new("watchlist_remove");
 // T0 integrity baseline: watched-file path -> content hash (hex).
 const BASELINE: TableDefinition<&str, &str> = TableDefinition::new("baseline");
+// Operator acknowledgements: evidence cursor -> note. Kept out of the append-only log so
+// the evidence chain stays tamper-evident; acking is triage metadata, not evidence.
+const ACK: TableDefinition<u64, &str> = TableDefinition::new("alert_ack");
 
 const META_LAST_HASH: &str = "last_hash";
 
@@ -91,6 +94,7 @@ impl Store {
             w.open_table(WL_ADD).map_err(store_err)?;
             w.open_table(WL_REMOVE).map_err(store_err)?;
             w.open_table(BASELINE).map_err(store_err)?;
+            w.open_table(ACK).map_err(store_err)?;
         }
         w.commit().map_err(store_err)?;
         Ok(Store { db })
@@ -251,6 +255,40 @@ impl Store {
         for item in t.iter().map_err(store_err)? {
             let (k, v) = item.map_err(store_err)?;
             out.push((k.value().to_string(), v.value().to_string()));
+        }
+        Ok(out)
+    }
+
+    // ---- Alert acknowledgements -----------------------------------------
+
+    /// Mark the alert at `cursor` acknowledged, with an optional note.
+    pub fn ack_alert(&self, cursor: u64, note: &str) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        {
+            w.open_table(ACK).map_err(store_err)?.insert(cursor, note).map_err(store_err)?;
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Clear the acknowledgement on the alert at `cursor`.
+    pub fn unack_alert(&self, cursor: u64) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        {
+            w.open_table(ACK).map_err(store_err)?.remove(cursor).map_err(store_err)?;
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Set of acknowledged alert cursors.
+    pub fn acked_cursors(&self) -> Result<BTreeSet<u64>> {
+        let r = self.db.begin_read().map_err(store_err)?;
+        let t = r.open_table(ACK).map_err(store_err)?;
+        let mut out = BTreeSet::new();
+        for item in t.iter().map_err(store_err)? {
+            let (k, _) = item.map_err(store_err)?;
+            out.insert(k.value());
         }
         Ok(out)
     }
