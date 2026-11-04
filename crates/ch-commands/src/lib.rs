@@ -12,6 +12,7 @@ pub mod persistence_command;
 pub mod download_command;
 pub mod upload_exec_command;
 pub mod watch_command;
+pub mod suspect_command;
 pub mod response_command;
 pub mod service_command;
 pub mod rotate_command;

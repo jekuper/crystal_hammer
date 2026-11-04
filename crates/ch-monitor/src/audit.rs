@@ -161,6 +161,7 @@ impl AlertBus {
 pub struct AuditHandle {
     bus: AlertBus,
     watchlist: Arc<RwLockStd<Vec<String>>>,
+    suspicious: Arc<RwLockStd<HashSet<String>>>,
     current_backend: Arc<RwLock<ActiveBackend>>,
 }
 
@@ -213,6 +214,23 @@ impl AuditHandle {
         list.len() != before
     }
 
+    /// Current suspicious-binary list (basenames), sorted.
+    pub fn list_suspicious(&self) -> Vec<String> {
+        let mut v: Vec<String> = lock_r(&self.suspicious).iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Add a binary basename to the suspicious list. Returns false if already present.
+    pub fn add_suspicious(&self, name: String) -> bool {
+        lock_w(&self.suspicious).insert(name)
+    }
+
+    /// Remove a binary basename from the suspicious list. Returns false if it wasn't present.
+    pub fn remove_suspicious(&self, name: &str) -> bool {
+        lock_w(&self.suspicious).remove(name)
+    }
+
     /// Inject a synthetic alert so an operator can confirm the live channel end to end.
     pub fn emit_test(&self, detail: &str) {
         let detail = if detail.is_empty() {
@@ -234,6 +252,7 @@ impl AuditHandle {
 #[derive(Clone)]
 pub struct AuditEngine {
     watchlist: Arc<RwLockStd<Vec<String>>>,
+    suspicious: Arc<RwLockStd<HashSet<String>>>,
     bus: AlertBus,
     allow_daemon: bool,
     current_backend: Arc<RwLock<ActiveBackend>>,
@@ -257,9 +276,10 @@ struct UserCache {
 }
 
 impl AuditEngine {
-    pub fn new(watchlist: Vec<String>, allow_daemon: bool) -> Self {
+    pub fn new(watchlist: Vec<String>, suspicious: Vec<String>, allow_daemon: bool) -> Self {
         Self {
             watchlist: Arc::new(RwLockStd::new(watchlist)),
+            suspicious: Arc::new(RwLockStd::new(suspicious.into_iter().collect())),
             bus: AlertBus::new(),
             allow_daemon,
             current_backend: Arc::new(RwLock::new(ActiveBackend::None)),
@@ -291,8 +311,15 @@ impl AuditEngine {
         AuditHandle {
             bus: self.bus.clone(),
             watchlist: self.watchlist.clone(),
+            suspicious: self.suspicious.clone(),
             current_backend: self.current_backend.clone(),
         }
+    }
+
+    /// True if an executed binary's basename is on the suspicious list.
+    fn is_suspicious(&self, exe: &str) -> bool {
+        let base = basename(exe);
+        !base.is_empty() && lock_r(&self.suspicious).contains(base)
     }
 
     /// Snapshot of the tracked paths. Taken fresh by every loop so runtime additions are
@@ -307,7 +334,7 @@ impl AuditEngine {
     fn publish(&self, f: &Finding) {
         let alert = Alert {
             kind: f.kind.to_string(),
-            severity: severity_for(f.kind),
+            severity: severity_for(f.kind, &f.path),
             path: f.path.clone(),
             detail: f.detail.clone(),
             actor: Actor {
@@ -1264,8 +1291,11 @@ impl EventProcessor {
         let is_exec = !is_module && syscall_name.is_some_and(|n| rules::EXEC_SYSCALLS.contains(&n));
 
         let exe = sc.get("exe").cloned().unwrap_or_default();
+        let suspicious_exec = is_exec && self.engine.is_suspicious(&exe);
         let kind = if is_module {
             "kernel_module"
+        } else if suspicious_exec {
+            "suspicious_exec"
         } else if is_exec {
             "exec"
         } else {
@@ -1298,6 +1328,8 @@ impl EventProcessor {
             success: sc.get("success").cloned().unwrap_or_default(),
             detail: if is_module {
                 "kernel module load/unload".to_owned()
+            } else if suspicious_exec {
+                "suspicious binary executed".to_owned()
             } else if is_exec {
                 "process executed".to_owned()
             } else {
@@ -1569,14 +1601,55 @@ pub(crate) fn unix_now() -> u64 {
 }
 
 /// Maps a finding kind to an operator-facing severity.
-fn severity_for(kind: &str) -> AlertSeverity {
+fn severity_for(kind: &str, path: &str) -> AlertSeverity {
     match kind {
-        "unattributed_change" | "kernel_module" | "audit_config_change" | "audit_pipeline" => {
-            AlertSeverity::Critical
-        }
+        "unattributed_change" | "kernel_module" | "audit_config_change" | "audit_pipeline"
+        | "suspicious_exec" => AlertSeverity::Critical,
+        // A change to a crown-jewel file (keys, cron, sudoers, auth db, persistence) is
+        // critical; other watched-file access stays at warn.
+        "file_access" if is_sensitive_path(path) => AlertSeverity::Critical,
         "file_access" | "module_list_change" => AlertSeverity::Warn,
         _ => AlertSeverity::Info,
     }
+}
+
+/// Basename of a path (text after the last '/'), or the whole string if there is no slash.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Crown-jewel files where any touch is treated as critical. `path` may be a comma-joined
+/// list (audit reports several names per event), so match by substring.
+fn is_sensitive_path(path: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "/etc/ssh/",
+        "/etc/cron",
+        "/var/spool/cron",
+        "/etc/sudoers",
+        "/etc/pam.d",
+    ];
+    const EXACT: &[&str] = &[
+        "/etc/crontab",
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/passwd",
+        "/etc/group",
+        "/etc/ld.so.preload",
+        "/etc/rc.local",
+    ];
+    for part in path.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if p.contains("/.ssh/") || p.ends_with("/.ssh") {
+            return true;
+        }
+        if PREFIXES.iter().any(|pre| p.starts_with(pre)) || EXACT.contains(&p) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parses /etc/passwd into a uid-string -> username map. Read directly, never via a host
@@ -2231,6 +2304,7 @@ mod tests {
     fn engine() -> AuditEngine {
         AuditEngine::new(
             vec!["/etc/shadow".into(), "/etc/ssh/sshd_config".into(), "/etc/passwd".into()],
+            vec!["curl".into(), "nc".into()],
             false,
         )
     }
@@ -2342,7 +2416,7 @@ mod tests {
         let file = dir.join("a.conf");
         std::fs::write(&file, "1").unwrap();
         let watch = dir.display().to_string();
-        let engine = AuditEngine::new(vec![watch], false);
+        let engine = AuditEngine::new(vec![watch], Vec::new(), false);
         let mut state = HashState::default();
 
         assert!(engine.rescan_hashes(&mut state).await.is_empty(), "baseline");

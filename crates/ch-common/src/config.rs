@@ -123,6 +123,40 @@ pub fn default_watchlist() -> Vec<String> {
     .collect()
 }
 
+/// Binaries whose execution is treated as a critical alert (by basename). These are
+/// download/exfil tools, interpreters, recon, persistence, defense-evasion, package
+/// managers, compilers and container-escape helpers - things that rarely run unprompted
+/// on a locked-down production host mid-incident. Operators extend/trim this at runtime
+/// with `suspect add|remove`. Deliberately excludes core shells/coreutils (sh, bash, ls,
+/// cat, ...) which would self-flood.
+pub fn default_suspicious_bins() -> Vec<String> {
+    [
+        // Download / transfer / reverse-shell
+        "curl", "wget", "nc", "ncat", "netcat", "socat", "tftp", "ftp", "lftp", "scp",
+        "sftp", "rsync", "telnet",
+        // Interpreters (common payload / reverse-shell hosts)
+        "python", "python3", "perl", "ruby", "php", "lua", "awk", "gawk",
+        // Recon / discovery
+        "whoami", "hostname", "w", "who", "last", "lastlog", "netstat", "arp", "nmap",
+        "ping", "dig", "nslookup", "host", "lsof", "finger",
+        // Account / persistence changes
+        "useradd", "userdel", "usermod", "passwd", "chpasswd", "groupadd", "visudo",
+        "crontab", "at", "insmod", "modprobe", "chattr", "update-rc.d",
+        // Defense evasion / anti-forensics
+        "auditctl", "setenforce", "iptables", "nft", "ufw", "shred", "wipe", "truncate",
+        "journalctl", "logrotate", "dmesg",
+        // Package managers
+        "apt", "apt-get", "dpkg", "yum", "dnf", "rpm", "pip", "pip3", "npm", "gem", "snap",
+        // Compilers
+        "gcc", "cc", "clang", "make", "ld",
+        // Container / namespace escape
+        "docker", "kubectl", "crictl", "runc", "ctr", "nsenter", "unshare", "chroot", "capsh",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         AgentConfig {

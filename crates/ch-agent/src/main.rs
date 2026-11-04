@@ -146,8 +146,16 @@ async fn main() -> Result<()> {
         None => base,
     };
     tracing::info!("Tracking {} path(s).", watchlist.len());
+    // Suspicious-binary list: compiled-in defaults plus the operator's persisted edits.
+    let suspect_base = ch_common::config::default_suspicious_bins();
+    let suspicious = match &store {
+        Some(s) => s.effective_suspects(suspect_base.clone()).unwrap_or(suspect_base),
+        None => suspect_base,
+    };
+    tracing::info!("Flagging {} suspicious binary name(s) on execution.", suspicious.len());
     let audit_engine = ch_monitor::audit::AuditEngine::new(
         watchlist,
+        suspicious,
         config.allow_audit_daemon
     );
     let audit = audit_engine.handle();

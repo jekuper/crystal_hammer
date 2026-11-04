@@ -61,6 +61,10 @@ const BASELINE: TableDefinition<&str, &str> = TableDefinition::new("baseline");
 // Operator acknowledgements: evidence cursor -> note. Kept out of the append-only log so
 // the evidence chain stays tamper-evident; acking is triage metadata, not evidence.
 const ACK: TableDefinition<u64, &str> = TableDefinition::new("alert_ack");
+// Runtime edits to the suspicious-binary list, as add/remove sets over the compiled-in
+// defaults (same scheme as the watchlist).
+const SUSPECT_ADD: TableDefinition<&str, u8> = TableDefinition::new("suspect_add");
+const SUSPECT_REMOVE: TableDefinition<&str, u8> = TableDefinition::new("suspect_remove");
 
 const META_LAST_HASH: &str = "last_hash";
 
@@ -95,6 +99,8 @@ impl Store {
             w.open_table(WL_REMOVE).map_err(store_err)?;
             w.open_table(BASELINE).map_err(store_err)?;
             w.open_table(ACK).map_err(store_err)?;
+            w.open_table(SUSPECT_ADD).map_err(store_err)?;
+            w.open_table(SUSPECT_REMOVE).map_err(store_err)?;
         }
         w.commit().map_err(store_err)?;
         Ok(Store { db })
@@ -291,6 +297,60 @@ impl Store {
             out.insert(k.value());
         }
         Ok(out)
+    }
+
+    /// Wipe the whole evidence log and reset the hash chain to genesis, and drop all
+    /// acknowledgements. An explicit operator "flush" - the log holds only alerts.
+    pub fn clear_alerts(&self) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        w.delete_table(EVIDENCE).map_err(store_err)?;
+        w.delete_table(ACK).map_err(store_err)?;
+        {
+            w.open_table(EVIDENCE).map_err(store_err)?;
+            w.open_table(ACK).map_err(store_err)?;
+            w.open_table(META).map_err(store_err)?.remove(META_LAST_HASH).map_err(store_err)?;
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    // ---- Suspicious-binary overrides ------------------------------------
+
+    /// Persist a runtime addition to the suspicious-binary list.
+    pub fn add_suspect(&self, name: &str) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        {
+            w.open_table(SUSPECT_ADD).map_err(store_err)?.insert(name, 1).map_err(store_err)?;
+            w.open_table(SUSPECT_REMOVE).map_err(store_err)?.remove(name).map_err(store_err)?;
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Persist a runtime removal (tombstones a default, drops a prior add).
+    pub fn remove_suspect(&self, name: &str) -> Result<()> {
+        let w = self.db.begin_write().map_err(store_err)?;
+        {
+            w.open_table(SUSPECT_REMOVE).map_err(store_err)?.insert(name, 1).map_err(store_err)?;
+            w.open_table(SUSPECT_ADD).map_err(store_err)?.remove(name).map_err(store_err)?;
+        }
+        w.commit().map_err(store_err)?;
+        Ok(())
+    }
+
+    /// Apply the persisted add/remove sets to `base`, returning a sorted, deduped list.
+    pub fn effective_suspects(&self, base: Vec<String>) -> Result<Vec<String>> {
+        let r = self.db.begin_read().map_err(store_err)?;
+        let mut set: BTreeSet<String> = base.into_iter().collect();
+        for item in r.open_table(SUSPECT_ADD).map_err(store_err)?.iter().map_err(store_err)? {
+            let (k, _) = item.map_err(store_err)?;
+            set.insert(k.value().to_string());
+        }
+        for item in r.open_table(SUSPECT_REMOVE).map_err(store_err)?.iter().map_err(store_err)? {
+            let (k, _) = item.map_err(store_err)?;
+            set.remove(k.value());
+        }
+        Ok(set.into_iter().collect())
     }
 }
 
