@@ -20,4 +20,5 @@ pub mod hunt_command;
 pub mod alerts_command;
 pub mod baseline_command;
 pub mod time_command;
+pub mod audit_command;
 pub mod sense_command;

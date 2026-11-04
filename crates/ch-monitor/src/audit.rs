@@ -58,6 +58,17 @@ impl ActiveBackend {
     fn uses_audit(self) -> bool {
         matches!(self, Self::Multicast | Self::LogTail | Self::Daemon)
     }
+
+    /// Human-readable backend name for the `audit` status command.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Multicast => "audit (kernel multicast)",
+            Self::LogTail => "audit (auditd log tail)",
+            Self::Daemon => "audit (self-registered daemon)",
+            Self::Fanotify => "fanotify (fallback)",
+            Self::None => "none (initializing)",
+        }
+    }
 }
 
 /// One raw event as delivered by a backend, before grouping and enrichment.
@@ -150,9 +161,15 @@ impl AlertBus {
 pub struct AuditHandle {
     bus: AlertBus,
     watchlist: Arc<RwLockStd<Vec<String>>>,
+    current_backend: Arc<RwLock<ActiveBackend>>,
 }
 
 impl AuditHandle {
+    /// The file-monitoring backend currently in use (audit variants vs fanotify fallback).
+    pub async fn backend(&self) -> ActiveBackend {
+        *self.current_backend.read().await
+    }
+
     /// Subscribe to the live alert stream (each item carries its sequence number). A
     /// subscriber sees every alert published after it subscribed.
     pub fn subscribe(&self) -> broadcast::Receiver<SeqAlert> {
@@ -274,6 +291,7 @@ impl AuditEngine {
         AuditHandle {
             bus: self.bus.clone(),
             watchlist: self.watchlist.clone(),
+            current_backend: self.current_backend.clone(),
         }
     }
 
