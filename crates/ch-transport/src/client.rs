@@ -111,6 +111,17 @@ impl Highlighter for ConsoleHelper {
         // Dim gray, reset afterwards
         Cow::Owned(format!("\x1b[90m{hint}\x1b[0m"))
     }
+
+    // Color the operator prompt for display only; rustyline measures width from the plain
+    // prompt string, so the cursor stays aligned.
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&'s self, prompt: &'p str, _default: bool) -> Cow<'b, str> {
+        if prompt.contains("hammer") {
+            // magenta crystal facet, cyan "hammer", green chevron
+            Cow::Owned("\x1b[1;35m\u{25c8}\x1b[0m \x1b[1;36mhammer\x1b[1;32m\u{276f}\x1b[0m ".to_string())
+        } else {
+            Cow::Borrowed(prompt)
+        }
+    }
 }
 
 impl Validator for ConsoleHelper {}
@@ -197,7 +208,12 @@ async fn establish(target: &Target, via: &[Hop]) -> Result<Handle<ClientHandler>
 
     tracing::info!("Connection established, transitioning stream to russh");
 
-    let config = Arc::new(russh::client::Config::default());
+    let mut config = russh::client::Config::default();
+    // Send SSH keepalives so an idle session (just streaming alerts) isn't dropped.
+    config.keepalive_interval = Some(std::time::Duration::from_secs(20));
+    config.keepalive_max = 10;
+    config.inactivity_timeout = None;
+    let config = Arc::new(config);
     let handler = ClientHandler {
         expected_key: keypair.public,
     };
@@ -286,6 +302,11 @@ async fn run_operator_repl(
         file_completer: FilenameCompleter::new(),
     }));
 
+    // While a command is running (especially the `alerts` TUI, which takes over the screen
+    // in raw mode), the live printer must stay silent or it corrupts that command's output.
+    // The reader keeps draining the stream but drops prints while paused.
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Subscribe to the agent's live file-tracker alerts for the life of the session. The
     // external printer draws alerts above the prompt without mangling the current input;
     // when it is unavailable (piped or headless stdin) we fall back to plain stdout so
@@ -296,12 +317,21 @@ async fn run_operator_repl(
                 tracing::warn!("Could not start alert stream: {}", e);
             } else {
                 println!("[alerts] live file-tracker alerts enabled");
+                let gate = paused.clone();
                 match rl.create_external_printer() {
                     Ok(mut printer) => {
-                        tokio::spawn(run_alert_reader(channel, move |s| printer.print(s).is_ok()));
+                        tokio::spawn(run_alert_reader(channel, move |s| {
+                            if gate.load(std::sync::atomic::Ordering::Relaxed) {
+                                return true; // paused: drop the line, keep the stream alive
+                            }
+                            printer.print(s).is_ok()
+                        }));
                     }
                     Err(_) => {
-                        tokio::spawn(run_alert_reader(channel, |s| {
+                        tokio::spawn(run_alert_reader(channel, move |s| {
+                            if gate.load(std::sync::atomic::Ordering::Relaxed) {
+                                return true;
+                            }
                             use std::io::Write;
                             print!("{s}");
                             std::io::stdout().flush().is_ok()
@@ -315,11 +345,16 @@ async fn run_operator_repl(
 
     println!("Crystal Hammer console started. Type 'help' for commands.");
 
+    // Plain prompt so rustyline measures its width correctly; the color is applied by
+    // ConsoleHelper::highlight_prompt for display only (rustyline, unlike GNU readline,
+    // does not use \x01/\x02 width markers). Glyphs: crystal facet + chevron.
+    const PROMPT: &str = "\u{25c8} hammer\u{276f} ";
+
     loop {
         // readline() blocks; run it on the blocking pool so the async runtime stays free
         // to drive the live alert reader while the operator sits at the prompt.
         let (returned_rl, readline) = tokio::task::spawn_blocking(move || {
-            let res = rl.readline("hammer> ");
+            let res = rl.readline(PROMPT);
             (rl, res)
         })
         .await
@@ -352,7 +387,12 @@ async fn run_operator_repl(
                         break;
                     }
                     other => {
-                        if let Err(e) = executor.execute(other, args, &mut session).await {
+                        // Silence the live printer for the duration of the command so it
+                        // can't write over the command's output (e.g. the alerts TUI).
+                        paused.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let outcome = executor.execute(other, args, &mut session).await;
+                        paused.store(false, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(e) = outcome {
                             eprintln!("Error: {}", e);
                             let err_str = e.to_string();
                             if err_str.contains("Channel send error") || err_str.contains("not connected") {

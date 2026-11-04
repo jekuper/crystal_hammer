@@ -485,6 +485,11 @@ async fn handle_ssh_session(
     let mut config = russh::server::Config {
         ..Default::default()
     };
+    // Keep idle operator sessions alive: send SSH keepalives instead of letting russh's
+    // inactivity timeout drop a connection that is just waiting for alerts.
+    config.keepalive_interval = Some(std::time::Duration::from_secs(20));
+    config.keepalive_max = 10;
+    config.inactivity_timeout = None;
 
     let mut rng = rand::rngs::OsRng;
     let host_key = ed25519_dalek::SigningKey::generate(&mut rng);
