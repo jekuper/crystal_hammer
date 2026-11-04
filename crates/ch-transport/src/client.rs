@@ -302,6 +302,11 @@ async fn run_operator_repl(
         file_completer: FilenameCompleter::new(),
     }));
 
+    // While a command is running (especially the `alerts` TUI, which takes over the screen
+    // in raw mode), the live printer must stay silent or it corrupts that command's output.
+    // The reader keeps draining the stream but drops prints while paused.
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Subscribe to the agent's live file-tracker alerts for the life of the session. The
     // external printer draws alerts above the prompt without mangling the current input;
     // when it is unavailable (piped or headless stdin) we fall back to plain stdout so
@@ -312,12 +317,21 @@ async fn run_operator_repl(
                 tracing::warn!("Could not start alert stream: {}", e);
             } else {
                 println!("[alerts] live file-tracker alerts enabled");
+                let gate = paused.clone();
                 match rl.create_external_printer() {
                     Ok(mut printer) => {
-                        tokio::spawn(run_alert_reader(channel, move |s| printer.print(s).is_ok()));
+                        tokio::spawn(run_alert_reader(channel, move |s| {
+                            if gate.load(std::sync::atomic::Ordering::Relaxed) {
+                                return true; // paused: drop the line, keep the stream alive
+                            }
+                            printer.print(s).is_ok()
+                        }));
                     }
                     Err(_) => {
-                        tokio::spawn(run_alert_reader(channel, |s| {
+                        tokio::spawn(run_alert_reader(channel, move |s| {
+                            if gate.load(std::sync::atomic::Ordering::Relaxed) {
+                                return true;
+                            }
                             use std::io::Write;
                             print!("{s}");
                             std::io::stdout().flush().is_ok()
@@ -373,7 +387,12 @@ async fn run_operator_repl(
                         break;
                     }
                     other => {
-                        if let Err(e) = executor.execute(other, args, &mut session).await {
+                        // Silence the live printer for the duration of the command so it
+                        // can't write over the command's output (e.g. the alerts TUI).
+                        paused.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let outcome = executor.execute(other, args, &mut session).await;
+                        paused.store(false, std::sync::atomic::Ordering::SeqCst);
+                        if let Err(e) = outcome {
                             eprintln!("Error: {}", e);
                             let err_str = e.to_string();
                             if err_str.contains("Channel send error") || err_str.contains("not connected") {
