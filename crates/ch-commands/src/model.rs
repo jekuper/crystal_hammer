@@ -17,6 +17,7 @@ use crate::attribute_command::{AttributeAgentCommand, AttributeClientCommand};
 use crate::hunt_command::{HuntAgentCommand, HuntClientCommand};
 use crate::alerts_command::{AlertsAgentCommand, AlertsClientCommand};
 use crate::baseline_command::{BaselineAgentCommand, BaselineClientCommand, DiffAgentCommand, DiffClientCommand};
+use crate::time_command::{TimeAgentCommand, TimeClientCommand};
 use crate::sense_command::{
     ConnsAgentCommand, ConnsClientCommand, PortsClientCommand, ProcsAgentCommand,
     ProcsClientCommand, RecentClientCommand, UsersClientCommand,
@@ -78,6 +79,7 @@ impl AgentCommandRegistry {
         r.register(Box::new(AlertsAgentCommand::new()));
         r.register(Box::new(BaselineAgentCommand::new()));
         r.register(Box::new(DiffAgentCommand::new()));
+        r.register(Box::new(TimeAgentCommand::new()));
         r.register(Box::new(ProcsAgentCommand::new()));
         r.register(Box::new(ConnsAgentCommand::new()));
         r
@@ -119,6 +121,7 @@ impl ClientCommandRegistry {
         r.register(Box::new(AlertsClientCommand::new()));
         r.register(Box::new(BaselineClientCommand::new()));
         r.register(Box::new(DiffClientCommand::new()));
+        r.register(Box::new(TimeClientCommand::new()));
         r.register(Box::new(ProcsClientCommand::new()));
         r.register(Box::new(ConnsClientCommand::new()));
         r.register(Box::new(PortsClientCommand::new()));
